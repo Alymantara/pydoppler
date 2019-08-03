@@ -3,7 +3,7 @@ import setuptools
 #upload to pip
 #pip install .
 #python setup.py sdist
-#twine upload dist/pycecream-1.1.2.tar.gz
+#twine upload dist/pydoppler-0.1.4.tar.gz
 
 import os
 
@@ -19,7 +19,7 @@ package_files('pydoppler/test_data')
 
 setuptools.setup(
      name='pydoppler',
-     version='0.1.1',
+     version='0.1.4',
      packages=['pydoppler'] ,
      package_data={'': paths},
      author="Juan V. Hernandez Santisteban",
