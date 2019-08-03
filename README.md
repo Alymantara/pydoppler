@@ -39,7 +39,16 @@
   in Echevarria et al. 2007, AJ, 134, 262 (https://ui.adsabs.harvard.edu/abs/2007AJ....134..262E/abstract).
 
   It will create a subdirectory from your working directory (called ugem99) which will contain text files
-  for each spectra (txtugem40*) .
+  for each spectra (txtugem40*). The format of each spectrum file is two columns: Wavelength and flux.
+  Wavelength is assumed to be in Angstrom.
+
+  In addition, a phase file (ugem0all.fas) is included which contains the name of the spectrum file and the corresponding 
+  orbital phase. This is a two column file:
+
+  txtugem4004 0.7150
+  txtugem4005 0.7794
+         ...
+
   ```python
   import pydoppler
 
@@ -48,7 +57,7 @@
   ```
   ##  Section 1.1: Load test data
 
-  #  Section 2: Perform Doppler tomography
+  #  Section 2:  Doppler tomography
 
 
   ```python
