@@ -4,7 +4,7 @@ import numpy as np
 import imp
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-import mynormalize
+import .mynormalize
 from scipy.signal import savgol_filter
 
 import os
