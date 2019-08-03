@@ -1,6 +1,6 @@
 Metadata-Version: 2.1
 Name: pydoppler
-Version: 0.1
+Version: 0.1.1
 Summary: A python wrapper for Henk Spruit's doppler tomography sowftare
 Home-page: https://github.com/alymantara/pydoppler
 Author: Juan V. Hernandez Santisteban

@@ -3,6 +3,7 @@ pydoppler
 setup.cfg
 setup.py
 pydoppler/__init__.py
+pydoppler/mynormalize.py
 pydoppler/pydoppler.py
 pydoppler.egg-info/PKG-INFO
 pydoppler.egg-info/SOURCES.txt
