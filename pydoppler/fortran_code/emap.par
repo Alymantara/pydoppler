@@ -1,0 +1,8 @@
+      parameter (npm=  28,nvpm= 477,nvm= 144)
+      parameter (nd=npm*nvpm,nr=0.8*nvm*nvm)
+      parameter (nt=nvpm*npm+nvm*nvpm*3+2*npm*nvm)
+      parameter (nri=0.9*nvm*nt/nd,ndi=0.9*nvm*nt/nr)
+c parameters for emap routines
+      parameter (nf=nd,nfp=ndi,nrp=nri)
+      parameter (ni=nvm,nj=nvm)
+      parameter (nch=1,nsu=1)

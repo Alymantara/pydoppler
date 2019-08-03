@@ -1,0 +1,12 @@
+0     ih       type of likelihood function (ih=1 for chi-squared)
+0     iw       iw=1 if error bars are to be read and used
+0.95  1.05    pb0,pb1    range of phases to be ignored
+7     ns       smearing width in default map
+8e-4     ac       accuracy of convergence
+150     nim      max no of iterations
+0.002 1.7  0        al0,alf,nal   starting value, factor, max number of alfas
+1.6     clim     'C-aim'
+2     ipri     printout control for standard output channel (ipr=2 for full)
+1     norm     norm=1 for normalization to flat light curve
+10e5   1  wid,af    width and amplitude central absorption fudge
+end of parameter input file
