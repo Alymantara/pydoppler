@@ -19,7 +19,7 @@ package_files('pydoppler/test_data')
 
 setuptools.setup(
      name='pydoppler',
-     version='0.1.5',
+     version='0.1.6',
      packages=['pydoppler'] ,
      package_data={'': paths},
      author="Juan V. Hernandez Santisteban",

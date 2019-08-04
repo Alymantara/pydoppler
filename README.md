@@ -84,13 +84,29 @@
   │   ├── phases_file
   └── fortran_code
   ```
-  ##  Section 2:  Doppler tomography
+  ##  Section 2:  Usage
+
+  You can use the sample_script.py file to run all the relevant commands
+  shown in Section 3 tutorial from terminal command line as:
+  ```
+  python sample_scipt.py
+  ```
+  or in a python console:
+  ```python
+  run sample_scipt.py
+  ```
+  This will read all the files, normalise and output the results. In the following
+  tutorial, I will explain briefly each main routine.
+
+  ##  Section 3:  Doppler tomography tutorial
   Before running any routines, verify that you have added all the relevant
   parameters into the PyDoppler object.
 
   * _NOTE:_ The pydoppler.spruit() will also copy into the working directory
   a copy of a sample script (sample_scipt.py) with all the commands in the
-  following tutorial.
+  following tutorial. The code will add a new script (e.g. sample_scipt-1.py)
+  if you use the "install_force=True" keyword, it will not overwrite the one
+  found in the directory.
 
   ```python
   import pydoppler
@@ -110,7 +126,7 @@
   dop.nbins = 28  # Number of bins. Only supported the number of spectra at the moment
   ```
 
-  ### Section 2.1: Trail spectra of original data
+  ### Section 3.1: Trail spectra of original data
   This routine reads in the raw data and prepares the files for further
   processing.
   ```python
