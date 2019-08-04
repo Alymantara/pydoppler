@@ -70,16 +70,17 @@
   pydoppler.test_data()
 
   ```
-  This will create a subdirectory from your working directory (called ugem99)
+  This will create a subdirectory (called ugem99) in your current working directory
   which will contain text files for each spectra (txtugem40*). The format of
   each spectrum file is two columns: _Wavelength_ and _Flux_.
-    * Wavelength is assumed to be in Angstrom.
-    * Don't use headers in the files or us a _#_ at the start of the line, so it
+  * Wavelength is assumed to be in Angstrom.
+  * Don't use headers in the files or us a _#_ at the start of the line, so it
   will be ignored.
 
-  In addition, a phase file (ugem0all.fas) is included which contains the name
-  of the spectrum file and the corresponding orbital phase.
-  This is a two column file:
+  In addition, a phase file (ugem0all.fas) will be added inside the ugem99
+  directory which contains the name
+  of each spectrum file and its corresponding orbital phase.
+  This is a two column file with the following format:
 ```
   txtugem4004 0.7150
   txtugem4005 0.7794
@@ -92,17 +93,19 @@
   I recommend to stick to the previous file format (as in the test dataset):
 
   * Individual spectra. Two-column files, _space separated_: Wavelength  Flux
-  * Phase file. One file which contains the number of the individual spectra
-  and its corresponding orbital phase
+  * Phase file. Two-column file, _space separated_: Spectrum_name  Orbital_Phase
 
   and the following directory tree in order for PyDoppler to work properly:
 
   ```
   wrk_dir
-  └── data_dir (ugem99)
+  ├── data_dir (your target)
+  │   │
   │   ├── individual_spectra (N spectra)
-  │   ├── phases_file
-  └── fortran_code
+  │   │
+  │   └── phases_file
+  │
+  └── fortran_code_files
   ```
 
   ##  Section 3:  Doppler tomography tutorial
@@ -179,7 +182,7 @@
   # Normalise the spectra
       dop.Dopin(continnum_band=[6500,6537,6591,6620],
       		 plot_median=False,poly_degree=2)
-    ```
+  ```
 
 
   <p align="middle">
