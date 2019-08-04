@@ -143,9 +143,16 @@
       dop.Dopin(continnum_band=[6500,6537,6591,6620],
       		 plot_median=False,poly_degree=2)
   ```
- <img src="pydoppler/test_data/output_images/Average_Spec.png" width="200" height="250" />
- <img src="pydoppler/test_data/output_images/Trail.png" width="200" height="250" />
 
+
+ <div class="row">
+   <div class="column">
+     <img src="pydoppler/test_data/output_images/Average_Spec.png" width="333" height="450" />
+   </div>
+   <div class="column">
+     <img src="pydoppler/test_data/output_images/Trail.png" width="333" height="450" />
+   </div>
+ </div>
   ### Section 2.3: Run the fortran code
   Now, let's run the tomography software!
   ```python
