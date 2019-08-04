@@ -145,7 +145,7 @@
     ```
 
 
-  <p float="center">
+  <p align="middle">
      <img src="pydoppler/test_data/output_images/Average_Spec.png" width="350" height="450" />
      <img src="pydoppler/test_data/output_images/Trail.png" width="350" height="450" />
   </p>
@@ -157,6 +157,7 @@
   dop.Syncdop()
   ```
 
+  The output of the fortran code is:
   ```
   nvp 477
   (28, 477)
@@ -231,29 +232,35 @@
   contours and streams.
   ```python
   # Read and plot map
-  cb,data = do.Dopmap(limits=[0.05,0.99],colorbar=True,cmaps=cm.gist_stern_r,
+  cb,data = dop.Dopmap(limits=[0.05,0.99],colorbar=True,cmaps=cm.mamga_r,
   					smooth=False,remove_mean=False)
   # Overplot the donor contours, keplerian and ballistic streams
-  qm=0.35
-  k1 = 107
-  inc=70
-  m1=1.2
-  porb=0.1769061911
+  qm=0.35   # mass ratio M_2 / M_1
+  k1 = 107  # Semi amplitude of the primary in km/s
+  inc=70    # inclination angle, in degrees
+  m1=1.2    # Mass of the primary in solar masses
+  porb=0.1769061911  # orbital period in days
+
+
   pydoppler.stream(qm,k1,porb,m1,inc)
   ```
-  <p float="center">
-     <img src="pydoppler/test_data/output_images/Doppler_Map.png" width="450" height="450" />
+  <p align="middle">
+     <img src="pydoppler/test_data/output_images/Doppler_Map.png" width="520" height="450" />
   </p>
 
-  ### Section 2.5: Spectra reconstrunction
+  ### Section 2.5: Spectra reconstruction
   Always check that reconstructed spectra looks like the original one. A good
   rule of thumb "If a feature on the Doppler tomogram isn not in the trail, most likely
   its not real!"
 
   ```python
   # plot trail spectra
-  cb2,cb3,dmr = do.Reco(colorbar=True,limits=[.05,0.95],cmaps=cm.gist_stern_r)
+  cb2,cb3,dmr = dop.Reco(colorbar=True,limits=[.05,0.95],cmaps=cm.magma_r)
   ```
+  <p align="middle">
+     <img src="pydoppler/test_data/output_images/Reconstruction.png" width="520" height="450" />
+  </p>
+
   ## Section 3: Troubleshoot
   This is an early version of the wrapper. Things will go wrong. If you find a
   bug or need a feature, I will try my best to work it out. If you think you can
