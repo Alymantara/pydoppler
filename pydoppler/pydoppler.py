@@ -89,8 +89,8 @@ class spruit:
             print('Phase file - {} - is not accessible. Check "base_dir" and "list"'.format(self.base_dir+'/'+self.list))
         inputs = np.loadtxt(self.base_dir+'/'+self.list,dtype={'names': ('files', 'phase'),'formats': ('S14', 'f4')})
         # Check 1st spectrum and get wavelength to interpolate
-        print()
-        print(inputs['files'][0].astype('str'))
+        #print()
+        #print(inputs['files'][0].astype('str'))
         w1st = np.loadtxt(self.base_dir+'/'+inputs['files'][0].astype('str'),unpack=True)
         if self.nbins==None:
             self.nbins=int(1.5/np.abs(inputs['phase'][2]-inputs['phase'][1]))   #By default
