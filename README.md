@@ -2,9 +2,15 @@
 
   This is the repository for a python wrapper for Henk Spruit's doppler tomography software.
   This code can will produce a trail spectra of a dataset, and perform
-  Doppler tomography maps. It is intended to be a light-weight for single lien datasets.
+  Doppler tomography maps. It is intended to be a light-weight code for
+  single emission line datasets.
   The code will be able to:
-
+  - [x] Load and normalised spectra
+  - [x] Plot a trail spectra at initial phase resolution and binned
+  - [x] Run Doppler tomography and plot reconstruvted spectra
+  - [ ] Perform initial spectra binning into user-defined phase bins
+  - [ ] User-friendly functions
+  - [ ] Auto-save of figures. Have to be done manually.
 
   The original code and IDL interface can be found at:
    *  https://wwwmpa.mpa-garching.mpg.de/~henk/
@@ -90,9 +96,9 @@
   dop.list = 'ugem0all.fas'		# Name of the input file
   dop.lam0 = 6562.8 # Wavelength zero in units of the original spectra
   dop.delta_phase = 0.003  # Exposure time in terms of orbital phase
-  dop.delw = 35	# size of Doppler map in wavelength
+  dop.delw = 35	# size of Doppler map in wavelength centred at lam0
   dop.overs = 0.3 # between 0-1, Undersampling of the spectra. 1= Full resolution
-  dop.gama = 36.0  # km /s
+  dop.gama = 36.0  # Systemic velocity in km /s
   dop.nbins = 28  # Number of bins. Only supported the number of spectra at the moment
   ```
 
@@ -250,8 +256,8 @@
 
   ### Section 2.5: Spectra reconstruction
   Always check that reconstructed spectra looks like the original one. A good
-  rule of thumb "If a feature on the Doppler tomogram isn not in the trail, most likely
-  its not real!"
+  rule of thumb "If a feature on the Doppler tomogram is not in the trail
+  spectrum, most likely its not real!"
 
   ```python
   # plot trail spectra
