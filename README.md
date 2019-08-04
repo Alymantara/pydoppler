@@ -1,5 +1,5 @@
 # PyDoppler
-  -
+
   This is the repository for a python wrapper for Henk Spruit's doppler tomography software.
   This code can will produce a trail spectra of a dataset, and perform
   Doppler tomography maps. It is intended to be a light-weight for single lien datasets.
@@ -7,11 +7,11 @@
 
 
   The original code and IDL interface can be found at:
-    *  https://wwwmpa.mpa-garching.mpg.de/~henk/
+   *  https://wwwmpa.mpa-garching.mpg.de/~henk/
 
   At the moment, there are many features that haven't been implemented. However, the code will be updated
-  continuously. If you have any queries/comments/bug report please send an e-mail to
-    * jvhs (at) st-andrews.ac.uk
+  continuously. If you have any queries/comments/bug report please send an e-mail to:
+   * jvhs (at) st-andrews.ac.uk
 
   If you make use of this software, please acknowledge the original code and this repository:
    * Spruit 1998, arXiv, astro-ph/9806141 (https://ui.adsabs.harvard.edu/abs/1998astro.ph..6141S/abstract)
@@ -22,7 +22,7 @@
   At the moment, only gfortran is supported.
 
 
-  Python >3.0 version is required (I am using 3.7, No tests have been done for backwards compatability with python >2.0).
+  Python >3.0 version is required (No tests have been done for backwards compatibility with python 2.X).
 
   You can download and install PyDoppler via pip. In a command line, just type:
 
@@ -38,7 +38,7 @@
 
   ##  Section 1: Load data
 
-  ###  Section 1.1: Load test data
+  ###  Section 1.1: Test case - accreting white dwarf U Gem
 
   You can start to test pydoppler with a test dataset kindly provided by J. Echevarria and published
   in Echevarria et al. 2007, AJ, 134, 262 (https://ui.adsabs.harvard.edu/abs/2007AJ....134..262E/abstract).
@@ -49,10 +49,13 @@
 
   In addition, a phase file (ugem0all.fas) is included which contains the name of the spectrum file and the corresponding
   orbital phase. This is a two column file:
-
+```
   txtugem4004 0.7150
   txtugem4005 0.7794
-         ...
+         .
+         .
+         .
+```
 
   ```python
   import pydoppler
@@ -61,7 +64,16 @@
 
   ```
   ###  Section 1.1: Load test data
+  The python wrapper is still in an initial release. I recommend to stick to the formats
+  and directory tree format in order for pydoppler to work properly.
 
+  ```
+  wrk_dir
+  └── data_dir (ugem99)
+  │   ├── individual_spectra (N spectra)
+  │   ├── phases_file
+  └── fortran_code
+  ```
   ##  Section 2:  Doppler tomography
   Before running any routines, verify that you have added all the relevant
   parameters into the doppler object
@@ -131,6 +143,7 @@
       dop.Dopin(continnum_band=[6500,6537,6591,6620],
       		 plot_median=False,poly_degree=2)
   ```
+ <img src="pydoppler/test_data/output_images/Average_Spec.png" width="200" height="200" />
   ![Average Spectrum of input data](pydoppler/test_data/output_images/Average_Spec.png?raw=true "Average Spectrum")
   ![Trail spectra](pydoppler/test_data/output_images/Trail.png?raw=true "Trail Spectra")
 
