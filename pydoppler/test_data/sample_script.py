@@ -1,7 +1,8 @@
 import pydoppler
 
 # Import sample data
-#pydoppler.test_data()
+# <<< COMMENT OUT IF YOU DONT NEED THE TEST DATASET >>>
+pydoppler.test_data()
 
 # Load base object for tomography
 dop = pydoppler.spruit()
