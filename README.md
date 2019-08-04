@@ -11,14 +11,14 @@
 
   At the moment, there are many features that haven't been implemented. However, the code will be updated
   continuously. If you have any queries/comments/bug report please send an e-mail to:
-   * jvhs (at) st-andrews.ac.uk
+   * jvhs1 (at) st-andrews.ac.uk
 
   If you make use of this software, please acknowledge the original code and this repository:
    * Spruit 1998, arXiv, astro-ph/9806141 (https://ui.adsabs.harvard.edu/abs/1998astro.ph..6141S/abstract)
 
   ## Requirements & Installation
 
-  The doppler tomography code is written in fortran. Please ensure that you have a fortran compiler installed, in particular gfortran.
+  The doppler tomography code is written in fortran. Please ensure that you have a fortran compiler installed.
   At the moment, only gfortran is supported.
 
 
@@ -40,7 +40,7 @@
 
   ###  Section 1.1: Test case - accreting white dwarf U Gem
 
-  You can start to test pydoppler with a test dataset kindly provided by J. Echevarria and published
+  You can start to test PyDoppler with a test dataset kindly provided by J. Echevarria and published
   in Echevarria et al. 2007, AJ, 134, 262 (https://ui.adsabs.harvard.edu/abs/2007AJ....134..262E/abstract).
 
   It will create a subdirectory from your working directory (called ugem99) which will contain text files
@@ -64,8 +64,8 @@
 
   ```
   ###  Section 1.1: Load test data
-  The python wrapper is still in an initial release. I recommend to stick to the formats
-  and directory tree format in order for pydoppler to work properly.
+  The python wrapper is still in an initial release. I recommend to stick to the file formats
+  and directory tree in order for PyDoppler to work properly.
 
   ```
   wrk_dir
@@ -76,7 +76,7 @@
   ```
   ##  Section 2:  Doppler tomography
   Before running any routines, verify that you have added all the relevant
-  parameters into the doppler object
+  parameters into the PyDoppler object
 
   ```python
   import pydoppler
@@ -89,11 +89,11 @@
   dop.base_dir = 'ugem99' # Base directory for input spectra
   dop.list = 'ugem0all.fas'		# Name of the input file
   dop.lam0 = 6562.8 # Wavelength zero in units of the original spectra
-  dop.delta_phase = 0.003
+  dop.delta_phase = 0.003  # Exposure time in terms of orbital phase
   dop.delw = 35	# size of Doppler map in wavelength
   dop.overs = 0.3 # between 0-1, Undersampling of the spectra. 1= Full resolution
   dop.gama = 36.0  # km /s
-  dop.nbins = 28
+  dop.nbins = 28  # Number of bins. Only supported the number of spectra at the moment
   ```
 
   ### Section 2.1: Trail spectra of original data
@@ -143,9 +143,8 @@
       dop.Dopin(continnum_band=[6500,6537,6591,6620],
       		 plot_median=False,poly_degree=2)
   ```
- <img src="pydoppler/test_data/output_images/Average_Spec.png" width="200" height="200" />
-  ![Average Spectrum of input data](pydoppler/test_data/output_images/Average_Spec.png?raw=true "Average Spectrum")
-  ![Trail spectra](pydoppler/test_data/output_images/Trail.png?raw=true "Trail Spectra")
+ <img src="pydoppler/test_data/output_images/Average_Spec.png" width="200" height="250" />
+ <img src="pydoppler/test_data/output_images/Trail.png" width="200" height="250" />
 
   ### Section 2.3: Run the fortran code
   Now, let's run the tomography software!

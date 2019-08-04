@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from scipy.signal import savgol_filter
 
+plt.rcParams.update({'font.size': 12})
+
 import os
 
 plt.ion()
@@ -50,6 +52,8 @@ class spruit:
         self.plot=True                       # Plot in Python window
         self.plotlim=1.3                     # Plot limits. 1 = close fit.
         self.overs=0.4
+
+
 
         # %%%%%%%%%%%%%%%%%%  Doppler Options   %%%%%%%%%%%%%%%%%%
 
@@ -214,8 +218,10 @@ class spruit:
                 plt.draw()
         else:
             xor = continnum_band
+            lab1 = 'Cont Bands'
             for i in np.arange(4):
-                plt.axvline(x=xor[i],linestyle='--',color='k')
+                if i != 0: lab1 = ''
+                plt.axvline(x=xor[i],linestyle='--',color='k',label=lab1)
                 plt.draw()
         lop = ((self.wave[0]>xor[0]) * (self.wave[0]<xor[1])) + ((self.wave[0]>xor[2]) * (self.wave[0]<xor[3]))
         yor=avgspec[lop]/len(self.pha)
@@ -223,9 +229,11 @@ class spruit:
         z = np.polyfit(self.wave[0][lop], yor, poly_degree)
         pz = np.poly1d(z)
         linfit = pz(self.wave[0])
-        plt.plot(self.wave[0],linfit,'r')
-        plt.xlim(xor[0],xor[3])
+        plt.plot(self.wave[0],linfit,'r',label='Cont Fit')
+        lg = plt.legend(fontsize=14)
+        plt.xlim(xor[0]-10,xor[3]+10)
         plt.xlabel(r'Wavelength / $\AA$')
+        plt.ylabel('Input flux')
 
 
         ax=fig.add_subplot(212)
@@ -242,6 +250,7 @@ class spruit:
         plt.ylim(-0.05*np.max(avgspec[qq]/len(self.pha)-linfit[qq] -1.0),
                 np.max(avgspec[qq]/len(self.pha)-linfit[qq] -1.0)*1.1)
         plt.xlabel('Velocity km/s')
+        plt.ylabel('Bkg subtracted Flux')
         plt.draw()
         plt.tight_layout()
 
