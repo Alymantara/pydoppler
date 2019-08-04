@@ -1,6 +1,4 @@
-import imp
 import pydoppler
-imp.reload(pydoppler)
 
 # Import sample data
 #pydoppler.test_data()

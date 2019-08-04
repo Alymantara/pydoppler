@@ -1,4 +1,4 @@
 __modules__ = ['pydoppler']
 from .pydoppler import spruit, rebin_trail, stream, test_data
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"

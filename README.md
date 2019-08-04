@@ -86,7 +86,11 @@
   ```
   ##  Section 2:  Doppler tomography
   Before running any routines, verify that you have added all the relevant
-  parameters into the PyDoppler object
+  parameters into the PyDoppler object.
+
+  * _NOTE:_ The pydoppler.spruit() will also copy into the working directory
+  a copy of a sample script (sample_scipt.py) with all the commands in the
+  following tutorial.
 
   ```python
   import pydoppler

@@ -67,9 +67,20 @@ class spruit:
             if force_install:
                 print("-- Force_Install --")
                 os.system('cp '+self.module_path+'/fortran_code/* ./.')
+                os.system('cp '+self.module_path+'/test_data/sample_script.py ./.')
         else:
             print("-- Copying fortran code --")
             os.system('cp '+self.module_path+'/fortran_code/* ./.')
+            count = 0
+            dst_file = './sample_script.py'
+            while os.path.exists(dst_file):
+                count += 1
+                dst_file = './%s-%d%s' % ('sample_script', count, '.py')
+            #print 'Renaming %s to %s' % (file, dst_file)
+            #print dst_file
+            os.rename(file, dst_file)
+            os.system('cp '+self.module_path+'/test_data/sample_script.py '+\
+                      dst_file)
 
 
     def Foldspec(self):
