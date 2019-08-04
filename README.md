@@ -41,20 +41,38 @@
   pip install pydoppler -upgrade
   ```
 
+  ##  Section 1:  Usage
 
-  ##  Section 1: Load data
+  You can use the sample_script.py file to run all the relevant commands
+  _shown in sections 2 and 3_ from a terminal command line as:
+  ```
+  python sample_scipt.py
+  ```
+  or in a python console:
+  ```python
+  run sample_scipt.py
+  ```
+  This will read all the files, normalise the spectra, perform Doppler
+  tomography and output the results. In the following sections, I will briefly
+  explain each main routine.
 
-  ###  Section 1.1: Test case - the accreting white dwarf U Gem
+  ##  Section 2: How to load data
+
+  ###  Section 2.1: Test case - the accreting white dwarf - U Gem
 
   You can start to test PyDoppler with a test dataset kindly provided by J. Echevarria and published
   in Echevarria et al. 2007, AJ, 134, 262 (https://ui.adsabs.harvard.edu/abs/2007AJ....134..262E/abstract).
 
-  It will create a subdirectory from your working directory (called ugem99) which will contain text files
-  for each spectra (txtugem40*). The format of each spectrum file is two columns: Wavelength and flux.
-  Wavelength is assumed to be in Angstrom.
+  It will create a subdirectory from your working directory (called ugem99)
+  which will contain text files for each spectra (txtugem40*). The format of
+  each spectrum file is two columns: _Wavelength_ and _Flux_.
+    * Wavelength is assumed to be in Angstrom.
+    * Don't use headers in the files or us a _#_ at the start of the line, so it
+  will be ignored.
 
-  In addition, a phase file (ugem0all.fas) is included which contains the name of the spectrum file and the corresponding
-  orbital phase. This is a two column file:
+  In addition, a phase file (ugem0all.fas) is included which contains the name
+  of the spectrum file and the corresponding orbital phase.
+  This is a two column file:
 ```
   txtugem4004 0.7150
   txtugem4005 0.7794
@@ -69,7 +87,7 @@
   pydoppler.test_data()
 
   ```
-  ###  Section 1.1: Load test data
+  ###  Section 2.2: Load your data
   I recommend to stick to the following file formats and directory tree in order for
   PyDoppler to work properly.
 
@@ -84,19 +102,6 @@
   │   ├── phases_file
   └── fortran_code
   ```
-  ##  Section 2:  Usage
-
-  You can use the sample_script.py file to run all the relevant commands
-  shown in Section 3 tutorial from terminal command line as:
-  ```
-  python sample_scipt.py
-  ```
-  or in a python console:
-  ```python
-  run sample_scipt.py
-  ```
-  This will read all the files, normalise and output the results. In the following
-  tutorial, I will explain briefly each main routine.
 
   ##  Section 3:  Doppler tomography tutorial
   Before running any routines, verify that you have added all the relevant
