@@ -25,3 +25,16 @@ dop.Foldspec()
 # Normalise the spectra
 dop.Dopin(continnum_band=[6500,6537,6591,6620],
         plot_median=False,poly_degree=2)
+
+#This routine will display the outcome of the Doppler tomography. You can overplot
+#  contours and streams.
+cb,data = dop.Dopmap(limits=[0.05,0.99],colorbar=True,cmaps=cm.gist_stern_r,
+                     smooth=False,remove_mean=False)
+
+# Overplot the donor contours, keplerian and ballistic streams
+qm=0.35
+k1 = 107
+inc=70
+m1=1.2
+porb=0.1769061911
+pydoppler.stream(qm,k1,porb,m1,inc)

@@ -142,18 +142,89 @@
   # Normalise the spectra
       dop.Dopin(continnum_band=[6500,6537,6591,6620],
       		 plot_median=False,poly_degree=2)
-  ```
+    ```
 
 
-<p float="left">
+  <p float="center">
      <img src="pydoppler/test_data/output_images/Average_Spec.png" width="350" height="450" />
      <img src="pydoppler/test_data/output_images/Trail.png" width="350" height="450" />
-</p>
+  </p>
+
   ### Section 2.3: Run the fortran code
   Now, let's run the tomography software!
   ```python
   # Perform tomography
   dop.Syncdop()
+  ```
+
+  ```
+  nvp 477
+  (28, 477)
+  nv 143 143
+  Estimated Memory required  354  Mbytes
+        parameter (nd=npm*nvpm,nr=0.8*nvm*nvm)
+
+        parameter (nt=nvpm*npm+nvm*nvpm*3+2*npm*nvm)
+
+        parameter (nri=0.9*nvm*nt/nd,ndi=0.9*nvm*nt/nr)
+
+  c parameters for emap routines
+
+        parameter (nf=nd,nfp=ndi,nrp=nri)
+
+        parameter (ni=nvm,nj=nvm)
+
+        parameter (nch=1,nsu=1)
+
+  * Computing MEM tomogram
+  cp -f cclock.f clock.f ; gfortran -O -w -o dopp dop.f clock.f
+  dopp
+  make: dopp: No such file or directory
+  make: *** [dop.out] Error 1
+   RL max entropy, floating defaults
+   ih        0  (log likelihood)                      
+   iw        0  (no error bars read in)               
+   pb0,pb1 0.950 1.050
+   ns        7
+   ac      8.00E-04
+   nim     150
+   al0, alf, nal    0.0020 1.7000  -1
+   clim   1.6000
+   ipri    2
+   norm    1
+   wid, af   0.10E+07 1.0000
+   HOLAQQ NOW 2Q
+   cpu for geometry      0.19
+   HOLAQQQQ
+   it      H+alfa*S        delta
+     1  3.064384039127E+04   8.97E-01
+     2  3.124296879919E+04   8.88E-01
+     3  3.174029201244E+04   8.10E-01
+     4  3.187324638623E+04   6.27E-01
+     5  3.189338120949E+04   4.84E-01
+     6  3.189804389182E+04   3.63E-01
+     7  3.189972657354E+04   2.60E-01
+     8  3.190005031439E+04   2.13E-01
+     9  3.190020880677E+04   1.65E-01
+    10  3.190026635720E+04   1.43E-01
+    11  3.190030859976E+04   1.14E-01
+    12  3.190032174052E+04   9.00E-02
+    13  3.190032685539E+04   7.44E-02
+    14  3.190032853609E+04   5.82E-02
+    15  3.190032918090E+04   4.18E-02
+    16  3.190032942768E+04   2.94E-02
+    17  3.190032951013E+04   2.23E-02
+    18  3.190032954797E+04   1.53E-02
+    19  3.190032956032E+04   1.32E-02
+    20  3.190032956654E+04   9.57E-03
+    21  3.190032956866E+04   5.22E-03
+    22  3.190032956935E+04   1.92E-03
+    23  3.190032956960E+04   2.18E-03
+    24  3.190032956968E+04   8.18E-04
+    25  3.190032956971E+04   4.46E-04
+   ni, al, hs, rr:   25 0.00200  0.319003296E+05 1.48261 1.60000
+   cpu for iteration    0.81
+   entropy -2.4072E+04
   ```
   ### Section 2.4: Plot the tomography map
   This routine will display the outcome of the Doppler tomography. You can overplot
@@ -170,6 +241,10 @@
   porb=0.1769061911
   pydoppler.stream(qm,k1,porb,m1,inc)
   ```
+  <p float="center">
+     <img src="pydoppler/test_data/output_images/Doppler_Map.png" width="450" height="450" />
+  </p>
+
   ### Section 2.5: Spectra reconstrunction
   Always check that reconstructed spectra looks like the original one. A good
   rule of thumb "If a feature on the Doppler tomogram isn not in the trail, most likely
