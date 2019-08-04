@@ -62,8 +62,15 @@
 
   You can start to test PyDoppler with a test dataset kindly provided by J. Echevarria and published
   in Echevarria et al. 2007, AJ, 134, 262 (https://ui.adsabs.harvard.edu/abs/2007AJ....134..262E/abstract).
+  To copy the data to your working directory, open a (i)python console and run the
+  following commands:
+  ```python
+  import pydoppler
 
-  It will create a subdirectory from your working directory (called ugem99)
+  pydoppler.test_data()
+
+  ```
+  This will create a subdirectory from your working directory (called ugem99)
   which will contain text files for each spectra (txtugem40*). The format of
   each spectrum file is two columns: _Wavelength_ and _Flux_.
     * Wavelength is assumed to be in Angstrom.
@@ -81,19 +88,14 @@
          .
 ```
 
-  ```python
-  import pydoppler
-
-  pydoppler.test_data()
-
-  ```
   ###  Section 2.2: Load your data
-  I recommend to stick to the following file formats and directory tree in order for
-  PyDoppler to work properly.
+  I recommend to stick to the previous file format (as in the test dataset):
 
   * Individual spectra. Two-column files, _space separated_: Wavelength  Flux
   * Phase file. One file which contains the number of the individual spectra
   and its corresponding orbital phase
+
+  and the following directory tree in order for PyDoppler to work properly:
 
   ```
   wrk_dir
