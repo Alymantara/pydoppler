@@ -1,22 +1,22 @@
 # PyDoppler
 
   This is the repository for a python wrapper for Henk Spruit's doppler tomography software.
-  This code can will produce a trail spectra of a dataset, and perform
+  This code can produce a trail spectra of a dataset, and perform
   Doppler tomography maps. It is intended to be a light-weight code for
   single emission line datasets.
   The code will be able to:
-  - [x] Load and normalised spectra
+  - [x] Load and normalise spectra
   - [x] Plot a trail spectra at initial phase resolution and binned
-  - [x] Run Doppler tomography and plot reconstruvted spectra
+  - [x] Run Doppler tomography and plot reconstructed spectra
   - [ ] Perform initial spectra binning into user-defined phase bins
   - [ ] User-friendly functions
-  - [ ] Auto-save of figures. Have to be done manually.
+  - [ ] Auto-save figures.
 
   The original code and IDL interface can be found at:
    *  https://wwwmpa.mpa-garching.mpg.de/~henk/
 
   At the moment, there are many features that haven't been implemented. However, the code will be updated
-  continuously. If you have any queries/comments/bug report please send an e-mail to:
+  continuously. If you have any queries/comments/bug reports please send an e-mail to:
    * jvhs1 (at) st-andrews.ac.uk
 
   If you make use of this software, please acknowledge the original code and this repository:
@@ -30,7 +30,7 @@
 
   Python >3.0 version is required (No tests have been done for backwards compatibility with python 2.X).
 
-  You can download and install PyDoppler via pip. In a command line, just type:
+  You can download and install PyDoppler via pip. In a terminal command line, just type:
 
   ```
   pip install pydoppler
@@ -44,7 +44,7 @@
 
   ##  Section 1: Load data
 
-  ###  Section 1.1: Test case - accreting white dwarf U Gem
+  ###  Section 1.1: Test case - the accreting white dwarf U Gem
 
   You can start to test PyDoppler with a test dataset kindly provided by J. Echevarria and published
   in Echevarria et al. 2007, AJ, 134, 262 (https://ui.adsabs.harvard.edu/abs/2007AJ....134..262E/abstract).
@@ -70,8 +70,12 @@
 
   ```
   ###  Section 1.1: Load test data
-  The python wrapper is still in an initial release. I recommend to stick to the file formats
-  and directory tree in order for PyDoppler to work properly.
+  I recommend to stick to the following file formats and directory tree in order for
+  PyDoppler to work properly.
+
+  * Individual spectra. Two-column files, _space separated_: Wavelength  Flux
+  * Phase file. One file which contains the number of the individual spectra
+  and its corresponding orbital phase
 
   ```
   wrk_dir
@@ -143,7 +147,7 @@
   ### Section 2.2: Normalise the data and set doppler files
   You will need to define a continnum band - one at each side of the emission line -
   to fit and later subtract the continuum. This normalised spectra will be put in
-  in a dopin file to be read by the fortran code.
+  in a file to be read by the fortran code.
   ```python  
   # Normalise the spectra
       dop.Dopin(continnum_band=[6500,6537,6591,6620],

@@ -20,6 +20,11 @@ pydoppler/fortran_code/hclock.f
 pydoppler/fortran_code/iclock.f
 pydoppler/fortran_code/lobe.f
 pydoppler/fortran_code/makefile
+pydoppler/test_data/sample_script.py
+pydoppler/test_data/output_images/Average_Spec.png
+pydoppler/test_data/output_images/Doppler_Map.png
+pydoppler/test_data/output_images/Reconstruction.png
+pydoppler/test_data/output_images/Trail.png
 pydoppler/test_data/ugem99/txhugem4004
 pydoppler/test_data/ugem99/txhugem4005
 pydoppler/test_data/ugem99/txhugem4006
