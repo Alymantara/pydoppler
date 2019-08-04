@@ -136,7 +136,7 @@
   dop.nbins = 28  # Number of bins. Only supported the number of spectra at the moment
   ```
 
-  ### Section 3.1: Trail spectra of original data
+  ### Section 3.1: Read the data
   This routine reads in the raw data and prepares the files for further
   processing.
   ```python
