@@ -145,14 +145,10 @@
   ```
 
 
- <div class="row">
-   <div class="column">
-     <img src="pydoppler/test_data/output_images/Average_Spec.png" width="333" height="450" />
-   </div>
-   <div class="column">
-     <img src="pydoppler/test_data/output_images/Trail.png" width="333" height="450" />
-   </div>
- </div>
+<p float="left">
+     <img src="pydoppler/test_data/output_images/Average_Spec.png" width="350" height="450" />
+     <img src="pydoppler/test_data/output_images/Trail.png" width="350" height="450" />
+</p>
   ### Section 2.3: Run the fortran code
   Now, let's run the tomography software!
   ```python
