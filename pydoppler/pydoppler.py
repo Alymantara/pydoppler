@@ -37,7 +37,6 @@ class spruit:
         self.normalised_wave = 0.0
         self.base_dir = '.'
         self.lam0 = 6562.83
-        self.dellx = 200
         self.delw = 80
         self.list = 'phases.txt'
         self.overs = 0.3
@@ -198,14 +197,11 @@ class spruit:
                 ss=i
 
 
-        fig=plt.figure(num="Average Spec")
+        fig=plt.figure(num="Average Spec",figsize=(6.57,8.57))
         plt.clf()
         ax=fig.add_subplot(211)
         avgspec=np.sum(self.flux,axis=0)
         plt.plot(self.wave[0],avgspec/len(self.pha))
-        plt.axvline(x=self.wave[0][ss-self.dellx],color='k')
-        plt.axvline(x=self.wave[0][ss+self.dellx],color='k')
-        plt.xlim(self.wave[0][ss-self.dellx]-15,self.wave[0][ss+self.dellx]+15)
 
         plt.draw()
         if not continnum_band:
@@ -229,6 +225,7 @@ class spruit:
         linfit = pz(self.wave[0])
         plt.plot(self.wave[0],linfit,'r')
         plt.xlim(xor[0],xor[3])
+        plt.xlabel(r'Wavelength / $\AA$')
 
 
         ax=fig.add_subplot(212)
@@ -237,11 +234,16 @@ class spruit:
         plt.plot(vell,avgspec/len(self.pha)-linfit,'k')
         plt.axhline(y=0,linestyle='--',color='k')
         plt.axvline(x=-self.delw/self.lam0*cl,linestyle='-',color='DarkOrange')
-        plt.axvline(x= self.delw/self.lam0*cl,linestyle='-',color='DarkOrange')
-        plt.xlim(-3100,3100)
-        qq = (np.abs(vell) < 3000)
-        plt.ylim(-0.1,np.max(avgspec[qq]/len(self.pha)-linfit[qq] -1.0)*1.1)
+        plt.axvline(x= self.delw/self.lam0*cl,linestyle='-',
+                    color='DarkOrange',label='DopMap limits')
+        lg = plt.legend(fontsize=14)
+        plt.xlim(-self.delw/self.lam0*cl*1.5,self.delw/self.lam0*cl*1.5)
+        qq = (np.abs(vell) < self.delw/self.lam0*cl*1.5)
+        plt.ylim(-0.05*np.max(avgspec[qq]/len(self.pha)-linfit[qq] -1.0),
+                np.max(avgspec[qq]/len(self.pha)-linfit[qq] -1.0)*1.1)
+        plt.xlabel('Velocity km/s')
         plt.draw()
+        plt.tight_layout()
 
         ######## Do individual fit on the blaze
         for ct,flu in enumerate(self.flux):
@@ -1424,7 +1426,7 @@ def test_data():
     module_path = os.path.dirname(os.path.realpath(__file__))
     print("-- Copying test data --")
     os.system('cp -r '+module_path+'/test_data/* ./.')
-# The Normalize class is largely based on code provided by Sarah Graves.
+
 
 import numpy as np
 import numpy.ma as ma
@@ -1435,6 +1437,7 @@ from matplotlib.colors import Normalize
 
 class MyNormalize(Normalize):
     '''
+    # The Normalize class is largely based on code provided by Sarah Graves.
     A Normalize class for imshow that allows different stretching functions
     for astronomical images.
     '''

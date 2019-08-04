@@ -1,10 +1,10 @@
 # PyDoppler
-
+  -
   This is the repository for a python wrapper for Henk Spruit's doppler tomography software.
   This code can will produce a trail spectra of a dataset, and perform
   Doppler tomography maps. It is intended to be a light-weight for single lien datasets.
   The code will be able to:
-  -
+
 
   The original code and IDL interface can be found at:
     *  https://wwwmpa.mpa-garching.mpg.de/~henk/
@@ -77,19 +77,18 @@
   dop.base_dir = 'ugem99' # Base directory for input spectra
   dop.list = 'ugem0all.fas'		# Name of the input file
   dop.lam0 = 6562.8 # Wavelength zero in units of the original spectra
-  dop.dellx = 220  # Delta in pixels
   dop.delta_phase = 0.003
-  dop.delw = 35	# size of Doppler map in wavelenght
+  dop.delw = 35	# size of Doppler map in wavelength
   dop.overs = 0.3 # between 0-1, Undersampling of the spectra. 1= Full resolution
   dop.gama = 36.0  # km /s
   dop.nbins = 28
   ```
 
-  ### Trail spectra of original data
+  ### Section 2.1: Trail spectra of original data
   This routine reads in the raw data and prepares the files for further
   processing.
   ```python
-  # Read in maps
+  # Read in the individual spectra and orbital phase information
   dop.Foldspec()
   ```
   ```
@@ -123,24 +122,25 @@
   028 txhugem4031  0.1372 2048
 ```
 
-  ### Normalise the data and set doppler files
+  ### Section 2.2: Normalise the data and set doppler files
   You will need to define a continnum band - one at each side of the emission line -
   to fit and later subtract the continuum. This normalised spectra will be put in
   in a dopin file to be read by the fortran code.
   ```python  
   # Normalise the spectra
-  dop.Dopin(continnum_band=[6500,6537,6591,6620],
-  		 plot_median=False,poly_degree=2)
+      dop.Dopin(continnum_band=[6500,6537,6591,6620],
+      		 plot_median=False,poly_degree=2)
   ```
-  ![Alt text](relative/path/to/img.jpg?raw=true "Title")
+  ![Average Spectrum of input data](pydoppler/test_data/output_images/Average_Spec.png?raw=true "Average Spectrum")
+  ![Trail spectra](pydoppler/test_data/output_images/Trail.png?raw=true "Trail Spectra")
 
-  ### Normalise the data and set doppler files
+  ### Section 2.3: Run the fortran code
   Now, let's run the tomography software!
   ```python
   # Perform tomography
   dop.Syncdop()
   ```
-  ### Plot the tomography map
+  ### Section 2.4: Plot the tomography map
   This routine will display the outcome of the Doppler tomography. You can overplot
   contours and streams.
   ```python
@@ -155,7 +155,7 @@
   porb=0.1769061911
   pydoppler.stream(qm,k1,porb,m1,inc)
   ```
-  ### Spectra reconstrunction
+  ### Section 2.5: Spectra reconstrunction
   Always check that reconstructed spectra looks like the original one. A good
   rule of thumb "If a feature on the Doppler tomogram isn not in the trail, most likely
   its not real!"
@@ -164,7 +164,7 @@
   # plot trail spectra
   cb2,cb3,dmr = do.Reco(colorbar=True,limits=[.05,0.95],cmaps=cm.gist_stern_r)
   ```
-  ## Troubleshoot
+  ## Section 3: Troubleshoot
   This is an early version of the wrapper. Things will go wrong. If you find a
   bug or need a feature, I will try my best to work it out. If you think you can
   add to this wrapper, I encourage you push new changes and contribute to it.
