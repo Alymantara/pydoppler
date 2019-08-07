@@ -3,7 +3,7 @@ import setuptools
 # upload to pip
 # pip install .
 # python3 setup.py sdist bdist_wheel
-# twine upload dist/pydoppler-0.1.5.tar.gz
+# twine upload dist/pydoppler-0.1.8.tar.gz
 
 import os
 
@@ -19,7 +19,7 @@ package_files('pydoppler/test_data')
 
 setuptools.setup(
      name='pydoppler',
-     version='0.1.6',
+     version='0.2.0',
      packages=['pydoppler'] ,
      package_data={'': paths},
      author="Juan V. Hernandez Santisteban",

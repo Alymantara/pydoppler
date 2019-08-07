@@ -5,6 +5,7 @@ import imp
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from scipy.signal import savgol_filter
+import sys
 
 plt.rcParams.update({'font.size': 12})
 
@@ -45,6 +46,8 @@ class spruit:
         self.gama = 0.0
         self.delta_phase = 0.001
 
+        self.verbose = True
+
         ###### Plotting parameters
         self.psname='j0644'              # Name of output plot file
         self.output='pdf'                    # Can choose between: pdf, eps or png
@@ -53,6 +56,22 @@ class spruit:
         self.plotlim=1.3                     # Plot limits. 1 = close fit.
         self.overs=0.4
 
+        ####### Dop.in parameters
+        self.ih = 0
+        self.iw = 0
+        self.pb0 = 0.95
+        self.pb1 = 1.05
+        self.ns = 7
+        self.ac = 8e-4
+        self.nim = 150
+        self.al0 = 0.002
+        self.alf = 1.7
+        self.nal = 0
+        self.clim = 1.6
+        self.ipri = 2
+        self.norm = 1
+        self.wid = 10e5
+        self.af = 0.0
 
 
         # %%%%%%%%%%%%%%%%%%  Doppler Options   %%%%%%%%%%%%%%%%%%
@@ -67,9 +86,29 @@ class spruit:
             if force_install:
                 print("-- Force_Install --")
                 os.system('cp '+self.module_path+'/fortran_code/* ./.')
+                count = 0
+                dst_file = './sample_script.py'
+                while os.path.exists(dst_file):
+                    count += 1
+                    dst_file = './%s-%d%s' % ('sample_script', count, '.py')
+                #print 'Renaming %s to %s' % (file, dst_file)
+                print("PyDoppler scipt -->",dst_file)
+                #os.rename(file, dst_file)
+                os.system('cp '+self.module_path+'/test_data/sample_script.py '+\
+                          dst_file)
         else:
             print("-- Copying fortran code --")
             os.system('cp '+self.module_path+'/fortran_code/* ./.')
+            count = 0
+            dst_file = './sample_script.py'
+            while os.path.exists(dst_file):
+                count += 1
+                dst_file = './%s-%d%s' % ('sample_script', count, '.py')
+            #print 'Renaming %s to %s' % (file, dst_file)
+            print("PyDoppler scipt -->",dst_file)
+            #os.rename(file, dst_file)
+            os.system('cp '+self.module_path+'/test_data/sample_script.py '+\
+                      dst_file)
 
 
     def Foldspec(self):
@@ -97,7 +136,8 @@ class spruit:
         w1st = np.loadtxt(self.base_dir+'/'+inputs['files'][0].astype('str'),unpack=True)
         if self.nbins==None:
             self.nbins=int(1.5/np.abs(inputs['phase'][2]-inputs['phase'][1]))   #By default
-        print ("Number of Bins:",self.nbins,np.abs(inputs['phase'][2]-inputs['phase'][1]))
+        if self.verbose:
+            print ("Number of Bins:",self.nbins,np.abs(inputs['phase'][2]-inputs['phase'][1]))
         wave,flux=[],[]
         for z,i in enumerate(inputs):
             w,f=np.loadtxt(self.base_dir+'/'+i['files'].astype('str'),unpack=True)
@@ -113,7 +153,7 @@ class spruit:
 
         bin=np.concatenate((bin[:self.nbins]-1,bin))
         wt=np.zeros(2*self.nbins)
-        trsp=np.zeros((2*self.nbins,len(w)))
+        trsp=np.zeros((2*self.nbins,len(wo)))
         # Determine
         dph = delp
         for ph,il in zip(pha,np.arange(len(pha))):
@@ -141,7 +181,7 @@ class spruit:
         self.trsp = trsp
 
     def Dopin(self,poly_degree=2, continnum_band=False,
-              plot_median = False, rebin_wave= 0.,
+              rebin=True,plot_median = False, rebin_wave= 0.,
               xlim=None,two_orbits=True,vel_space=True,
               verbose=False):
         """Normalises each spectrum to a user-defined continnum.
@@ -265,7 +305,7 @@ class spruit:
                 # Interpolate in velocity space
                 vell_temp=((self.normalised_wave/self.lam0)**2-1.0)*cl/(1.0 + \
                          (self.normalised_wave/self.lam0)**2)
-                vell = np.linspace(vell_temp[0],vell_temp[-1],vell_temp.size)
+                self.vell = np.linspace(vell_temp[0],vell_temp[-1],vell_temp.size)
                 self.normalised_flux = np.zeros((len(self.flux),lop.sum()))
 
             polmask = ((self.wave[0]/nufac>xor[0]) * (self.wave[0]/nufac<xor[1])) +\
@@ -275,19 +315,38 @@ class spruit:
             linfit = pz(self.normalised_wave)
 
             self.normalised_flux[ct] = np.array(flu[lop]) - np.array(linfit)
-            self.normalised_flux[ct] = np.interp(vell,vell_temp,self.normalised_flux[ct])
+            self.normalised_flux[ct] = np.interp(self.vell,vell_temp,self.normalised_flux[ct])
 
-        print(">> Max/Min velocities in map: {} / {}".format(vell.min(),vell.max()))
+        if self.verbose:
+            print(">> Max/Min velocities in map: {} / {}".format(self.vell.min(),
+                                                             self.vell.max()))
 
+
+        ##  JVHS 2019 August 6
+        ## Add binning
+        phase = np.linspace(0,2,self.nbins*2+1,endpoint=True) - 1./(self.nbins)/2.
+        phase = np.concatenate((phase,[2.0+1./(self.nbins)/2.]))
+        phase_dec = phase - np.floor(phase)
+        #print(phase_dec)
+        #rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):
+        trail,temp_phase = rebin_trail(self.vell, self.normalised_flux,
+                            self.input_phase, self.nbins, self.delta_phase,
+                            rebin_wave=None)
+
+        self.pha = self.input_phase
+        self.trsp = self.normalised_flux
+        #print(">> SHAPES = ",self.pha.shape,self.trsp.shape)
+        ## Phases of individual spectra
+        #print("LAM_SIZE= {}, VELL_SIZE={}".format(self.normalised_wave.size,self.vell.size))
         f=open('dopin','w')
-        f.write("{:8.0f}{:8.0f}{:13.2f}\n".format(len(self.flux),vell.size,self.lam0))
+        f.write("{:8.0f}{:8.0f}{:13.2f}\n".format(self.pha.size,
+                                        self.vell.size,
+                                        self.lam0))
 #        f.write(str(len(self.flux))+" "+str(self.nbins)+" "+str(self.lam0)+'\n')
         f.write("{:13.5f}{:8.0f}{:8.0f}    {:}\n".format(self.gama*1e5,0,0,
                                                 self.base_dir+'/'+self.list))
-
-        ## Phases of individual spectra
         ctr = 0
-        for pp in self.input_phase:
+        for pp in self.pha:
                 if ctr <5:
                     f.write("{:13.6f}".format(pp))
                     ctr +=1
@@ -297,7 +356,7 @@ class spruit:
         f.write("\n{:8.0f}\n".format(1))
         ctr = 0
 
-        for pp in np.ones(len(self.input_phase))*self.delta_phase:
+        for pp in np.ones(self.pha.size)*self.delta_phase:
                 if ctr <5:
                     f.write("{:13.6f}".format(pp))
                     ctr +=1
@@ -307,7 +366,7 @@ class spruit:
         if ctr != 0: f.write("\n")
         ##
         ctr = 0
-        for pp in vell:
+        for pp in self.vell:
                 #print('velo size:',len(vell))
                 if ctr <5:
                     f.write("{:13.5e}".format(pp*1e5))
@@ -319,7 +378,7 @@ class spruit:
         ctr = 0
 
         # Where we write the normalised flux
-        for pp in np.array(self.normalised_flux.T).flatten():
+        for pp in np.array(self.trsp.T).flatten():
                 if ctr <5:
                     f.write("{:13.5f}".format(pp))
                     ctr +=1
@@ -329,9 +388,7 @@ class spruit:
         if ctr != 0: f.write("\n")
         f.close()
 
-        phase = np.linspace(0,2,self.nbins*2+1,endpoint=True) - 1./(self.nbins)/2.
-        phase = np.concatenate((phase,[2.0+1./(self.nbins)/2.]))
-        phase_dec = phase - np.floor(phase)
+
 
         if xlim == None:
             rr = np.ones(self.normalised_wave.size,dtype='bool')
@@ -346,7 +403,7 @@ class spruit:
             print(dw , dw/rebin_wave)
             waver = np.arange(self.normalised_wave[rr][0],
                               self.normalised_wave[rr][-1],dw )
-
+        """
         trail = np.zeros((waver.size,phase.size))
 
         tots = trail.copy()
@@ -385,6 +442,7 @@ class spruit:
             trail+=temp.T
             tots += weights
         trail /= tots
+        """
 
         if plot_median:
             si = 0
@@ -412,7 +470,7 @@ class spruit:
             plt.axhline(y=0,ls='--',color='r',alpha=0.7)
             ax1.set_xticklabels([])
 
-            plt.xlim(self.lam0 - self.delw, self.lam0 + self.delw)
+            #plt.xlim(self.lam0 - self.delw, self.lam0 + self.delw)
             plt.ylim(-0.05,np.nanmax(np.nanmedian(self.normalised_flux,
                                                   axis=0)[rr])*1.1)
             ### Print trail spectra
@@ -451,7 +509,7 @@ class spruit:
 
 
 
-    def Syncdop(self):
+    def Syncdop(self,nri=0.9,ndi=0.7):
         '''
         Runs the fortran code dopp, using the output files from dopin
         Parameters
@@ -462,60 +520,103 @@ class spruit:
         -------
         None.
         '''
-
-        f=open('dopin')
-        lines=f.readlines()
-        f.close()
-        np,nvp=int(lines[0].split()[0]),int(lines[0].split()[1])
-        lines=[]
-
-        f=open('emap_ori.par')
-        lines=f.readlines()
-        f.close()
-        s=lines[0]
-        npm=int(s[s.find('npm=')+len('npm='):s.rfind(',nvpm')])
-        nvpm=int(s[s.find('nvpm=')+len('nvpm='):s.rfind(',nvm')])
-        nvm=int(s[s.find('nvm=')+len('nvm='):s.rfind(')')])
-        print('nvp',nvp)
-        print(self.normalised_flux.shape)
-        nv0=int(self.overs*nvp)
-        nv=max([nv0,int(min([1.5*nv0,np/3.]))])
-        print('nv',nv,nv0)
-        if nv%2 == 1:
-            nv+=1
-        #nv=120
-        nd=npm*nvpm
-        nr=0.8*nv*nv
-        nt=nvpm*npm+nv*nvpm*3+2*npm*nv
-        prmsize=0.9*nv*nt+0.9*nv*nt
-
-        print ('Estimated Memory required ',int(8*prmsize/1e6),' Mbytes')
-        #print nv,nvm,np,npm,nvp,nvpm
-        if nv != nvm or np != npm or nvp !=nvpm:
-            a1='      parameter (npm=%4d'% np
-            a2=',nvpm=%4d'%nvp
-            a3=',nvm=%4d)'%nv
-            a1=a1+a2+a3
-
-            f=open('emap.par','w')
-            f.write(a1+'\n')
-            for i in lines[1:]:
-                print(i)
-                if i !=3:
-                    f.write(i[:])
-                else:
-                    f.write(i[:]+')')
+        compile_flag = True
+        while compile_flag == True:
+            f=open('dop.in','w')
+            f.write("{}     ih       type of likelihood function (ih=1 for chi-squared)\n".format(self.ih))
+            f.write("{}     iw       iw=1 if error bars are to be read and used\n".format(self.iw))
+            f.write("{}  {}    pb0,pb1    range of phases to be ignored\n".format(self.pb0,self.pb1))
+            f.write("{}     ns       smearing width in default map\n".format(self.ns))
+            f.write("{:.1e}     ac       accuracy of convergence\n".format(self.ac))
+            f.write("{}     nim      max no of iterations\n".format(self.nim))
+            f.write("{} {}  {}        al0,alf,nal   starting value, factor, max number of alfas\n".format(self.al0,self.alf,self.nal))
+            f.write("{}     clim     'C-aim'\n".format(self.clim))
+            f.write("{}     ipri     printout control for standard output channel (ipr=2 for full)\n".format(self.ipri))
+            f.write("{}     norm     norm=1 for normalization to flat light curve\n".format(self.norm))
+            f.write("{:2.1e}   {}  wid,af    width and amplitude central absorption fudge\n".format(self.wid,self.af))
+            f.write("end of parameter input file")
             f.close()
-        print ('* Computing MEM tomogram')
-        #os.system('gfortran -O -o dopp_input.txt dop.in dop.f clock.f')
-        os.system('make dop.out')
-        os.system('./dopp dopp.out')
-        fo=open('dop.log')
-        lines=fo.readlines()
-        fo.close()
+
+            f=open('dopin')
+            lines=f.readlines()
+            f.close()
+            # np == npp
+            npp,nvp=int(lines[0].split()[0]),int(lines[0].split()[1])
+            lines=[]
+
+            f=open('emap_ori.par')
+            lines=f.readlines()
+            f.close()
+            s=lines[0]
+            npm=int(s[s.find('npm=')+len('npm='):s.rfind(',nvpm')])
+            nvpm=int(s[s.find('nvpm=')+len('nvpm='):s.rfind(',nvm')])
+            nvm=int(s[s.find('nvm=')+len('nvm='):s.rfind(')')])
+            nvp = self.vell.size
+            print('nvp',nvp)
+
+            print(self.trsp.shape)
+            nv0=int(self.overs*nvp)
+            nv=max([nv0,int(min([1.5*nv0,npp/3.]))])
+            print('nv',nv,nv0)
+            if nv%2 == 1:
+                nv+=1
+            #nv=120
+            nd = npm * nvpm
+            nr = 0.8 * nv * nv
+            nt = (nvpm * npm) + (nv * nvpm * 3) + (2 * npm * nv)
+            prmsize = (0.9 * nv * nt) + (0.9 * nv * nt)
+
+            print ('Estimated Memory required ',int(8*prmsize/1e6),' Mbytes')
+            #print nv,nvm,np,npm,nvp,nvpm
+            print("np={}; nvpm={}, nvm={}".format(npp, nvp, nv))
+            print('ND',nd)
+            print('NR',nr)
+            if nv != nvm or npp != npm or nvp !=nvpm:
+                a1='      parameter (npm=%4d'% npp
+                a2=',nvpm=%4d'%nvp
+                a3=',nvm=%4d)'%nv
+                a1=a1+a2+a3
+
+                f=open('emap.par','w')
+                f.write(a1+'\n')
+                for i,lino in enumerate(lines[1:]):
+                    #print(lino)
+                    if i == 2:
+                        tempo_str = '      parameter (nri={:.3f}*nvm*nt/nd,ndi={:.3f}*nvm*nt/nr)\n'.format(nri,ndi)
+                        #aprint(tempo_str)
+                        f.write(tempo_str)
+                    elif lino !=3:
+                        f.write(lino[:])
+                    else:
+                        f.write(lino[:]+')')
+                f.close()
+            if self.verbose:
+                print ('>> Computing MEM tomogram <<')
+                print ('----------------------------')
+            #os.system('gfortran -O -o dopp_input.txt dop.in dop.f clock.f')
+            os.system('make dop.out')
+            os.system('./dopp dopp.out')
+            fo=open('dop.log')
+            lines=fo.readlines()
+            fo.close()
+            #print(clim,rr)
+            if self.verbose: print ('----------------------------')
+            if lines[-1].split()[0] == 'projection':
+                nri = np.float(lines[-1].split()[-1])/np.float(lines[-2].split()[-1])
+                ndi = np.float(lines[-1].split()[-2])/np.float(lines[-2].split()[-2])
+                print('>> PROJECTION MATRIX TOO SMALL <<')
+                print('>> Recomputing with values from Spruit:')
+                print('>> ndi = {}, nri = {}'.format(ndi,nri))
+            else:
+                compile_flag=False
         clim,rr=lines[-2].split()[-1],lines[-2].split()[-2]
-        if rr>clim:
-            print ('NOT CONVERGED: Specified reduced chi^2 not reached:',rr,clim)
+        if rr > clim:
+            print ('>> NOT CONVERGED: Specified reduced chi^2 not reached: {} > {}'.format(rr,clim))
+            sys.exit()
+        else:
+            if self.verbose:
+                print ('>> Succesful Dopmap!')
+
 
 
     def Dopmap(self,dopout = 'dop.out',cmaps = cm.Greys_r,
@@ -563,7 +664,8 @@ class spruit:
             Data cube from Doppler map
 
         """
-        print(">> Reading {} file".format(dopout))
+        if self.verbose:
+            print(">> Reading {} file".format(dopout))
         fro=open(dopout,'r')
         lines=fro.readlines()
         fro.close()
@@ -579,7 +681,8 @@ class spruit:
         new = new.replace("E",'e')
         war = ''.join(new.splitlines()).split()
         #print(war)
-        print(">> Finished reading dop.out file")
+        if self.verbose:
+            print(">> Finished reading dop.out file")
         pha=np.array(war[:nph]).astype(np.float)/2.0/np.pi
         dum1=war[nph]
         dpha=np.array(war[nph+1:nph+1+nph]).astype(np.float)/2.0/np.pi
@@ -593,7 +696,7 @@ class spruit:
         last=last+nvp*nph
 
 
-        print(war[last])
+        #print(war[last])
         ih,iw,pb0,pb1,ns,ac,al,clim,norm,wid,af=int(war[last]),int(war[last+1]),float(war[last+2]),float(war[last+3]),int(war[last+4]),float(war[last+5]),float(war[last+6]),float(war[last+7]),int(war[last+8]),float(war[last+9]),float(war[last+10])
         nv,va,dd=int(war[last+11]),float(war[last+12]),war[last+13]
         last=last+14
@@ -621,9 +724,10 @@ class spruit:
         #new_data = np.arcsinh(new_data)
         if limits == None:
             limits = [np.nanmax((new_data))*0.95,np.nanmax((new_data))*1.05]
-        print("Limits auto {:6.5f} {:6.5f}".format(np.nanmedian(data)*0.8,np.nanmedian(data)*1.2))
-        print("Limits user {:6.5f} {:6.5f}".format(limits[0],limits[1]))
-        print("Limits min={:6.5f}, max={:6.5f}".format(np.nanmin(data),np.nanmax(data)))
+        if self.verbose:
+            print("Limits auto {:6.5f} {:6.5f}".format(np.nanmedian(data)*0.8,np.nanmedian(data)*1.2))
+            print("Limits user {:6.5f} {:6.5f}".format(limits[0],limits[1]))
+            print("Limits min={:6.5f}, max={:6.5f}".format(np.nanmin(data),np.nanmax(data)))
         # Here comes the plotting
         fig = plt.figure(num='Doppler Map',figsize=(8.57,8.57))
         plt.clf()
@@ -818,6 +922,7 @@ class spruit:
         figor = plt.figure('Reconstruction',figsize=(10,8))
         plt.clf()
         ax1 = figor.add_subplot(121)
+        print(np.nanmax(trail_dm))
         imgo = plt.imshow(trail_dm.T/np.nanmax(trail_dm),interpolation='nearest',
                     cmap=cmaps,aspect='auto',origin='upper',
                     extent=(x1_lim,x2_lim,phase[0],
@@ -839,7 +944,7 @@ class spruit:
         else:
             cbar2=1
         ax2 = figor.add_subplot(122)
-
+        print(np.nanmax(trail_dmr))
         imgo = plt.imshow(trail_dmr.T/np.nanmax(trail_dmr),interpolation='nearest',
                     cmap=cmaps,aspect='auto',origin='upper',
                     extent=(x1_lim,x2_lim,phase[0],
@@ -859,9 +964,12 @@ class spruit:
             cbar3.connect()
         else:
             cbar3=1
-        return cbar2,cbar3,dmr
+        return cbar2,cbar3,dmr,dm
 
 def rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):
+    """
+
+    """
     phase = np.linspace(0,2,nbins*2+1,endpoint=True) - 1./(nbins)/2.
     phase = np.concatenate((phase,[2.0+1./(nbins)/2.]))
     phase_dec = phase - np.floor(phase)

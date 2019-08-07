@@ -1,9 +1,8 @@
-import imp
 import pydoppler
-imp.reload(pydoppler)
-
+import matplotlib.pyplot as plt
 # Import sample data
-#pydoppler.test_data()
+# <<< COMMENT OUT IF YOU DONT NEED THE TEST DATASET >>>
+pydoppler.test_data()
 
 # Load base object for tomography
 dop = pydoppler.spruit()
@@ -26,9 +25,12 @@ dop.Foldspec()
 dop.Dopin(continnum_band=[6500,6537,6591,6620],
         plot_median=False,poly_degree=2)
 
+# Perform tomography
+dop.Syncdop(ndi=0.7,nri=0.9)
+
 # This routine will display the outcome of the Doppler tomography.
 # You can overplot contours and streams.
-cb,data = dop.Dopmap(limits=[0.05,0.99],colorbar=True,cmaps=cm.magma_r,
+cb,data = dop.Dopmap(limits=[0.05,0.99],colorbar=False,cmaps=plt.cm.magma_r,
                      smooth=False,remove_mean=False)
 
 # Overplot the donor contours, keplerian and ballistic streams
@@ -43,4 +45,4 @@ pydoppler.stream(qm,k1,porb,m1,inc)
 # Always check that reconstructed spectra looks like the original one. A good
 # rule of thumb "If a feature on the Doppler tomogram isn not in the trail,
 # most likely its not real!"
-cb2,cb3,dmr = dop.Reco(colorbar=True,limits=[.05,0.95],cmaps=cm.magma_r)
+cb2,cb3,dmr,dm = dop.Reco(colorbar=False,limits=[.05,0.95],cmaps=plt.cm.magma_r)

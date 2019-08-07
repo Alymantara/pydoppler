@@ -8,5 +8,5 @@
 1.6     clim     'C-aim'
 2     ipri     printout control for standard output channel (ipr=2 for full)
 1     norm     norm=1 for normalization to flat light curve
-10e5   1  wid,af    width and amplitude central absorption fudge
+10e5   0  wid,af    width and amplitude central absorption fudge
 end of parameter input file
