@@ -301,7 +301,29 @@
      <img src="pydoppler/test_data/output_images/Reconstruction.png" width="520" height="450" />
   </p>
 
-  ## Section 3: Troubleshoot
+  ## Section 3: Extra commands
+  There are many other commands that will interact with the Doppler tomogram. As
+  usual, you can update them inside the pydoppler.spruit object as we did in
+  section 2. The configurable parameters are:
+  ```python3
+  dop.ih = 0            # type of likelihood function (ih=1 for chi-squared)
+  dop.iw = 0            # iw=1 if error bars are to be read and used
+  dop.pb0 = 0.95        # range of phases to be ignored, between 0 and 1
+  dop.pb1 = 1.05        # range of phases to be ignored, between 1 and 2
+  dop.ns = 7            # smearing width in default map
+  dop.ac = 8e-4         # accuracy of convergence
+  dop.nim = 150         # max no of iterations
+  dop.al0 = 0.002       # starting value of alfa
+  dop.alf = 1.7         # factor
+  dop.nal = 0           # max number of alfas
+  dop.clim = 1.6        # 'C-aim'
+  dop.ipri = 2          # printout control for standard output channel (ipr=2 for full)
+  dop.norm = 1          # norm=1 for normalization to flat light curve
+  dop.wid = 10e5        # width of central absorption fudge
+  dop.af = 0.0          # amplitude of central absorption fudge
+  ```
+
+  ## Section 4: Troubleshoot
   This is an early version of the wrapper. Things will go wrong. If you find a
   bug or need a feature, I will try my best to work it out. If you think you can
   add to this wrapper, I encourage you push new changes and contribute to it.
