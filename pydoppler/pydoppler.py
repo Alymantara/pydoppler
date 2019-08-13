@@ -900,8 +900,8 @@ class spruit:
 
         data[data <= 0.0] = np.nan
         dpx[dpx <= 0.0] = np.nan
-        dmr[dmr <= 0.0] = np.nan
-        dm[dm <= 0.0] = np.nan
+        #dmr[dmr <= 0.0] = np.nan
+        #dm[dm <= 0.0] = np.nan
         #print(pha)
         #print(self.nbins)
         trail_dm,phase = rebin_trail(vp, dm.T, pha, self.nbins, self.delta_phase,

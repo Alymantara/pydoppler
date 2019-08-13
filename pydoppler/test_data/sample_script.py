@@ -46,3 +46,30 @@ pydoppler.stream(qm,k1,porb,m1,inc)
 # rule of thumb "If a feature on the Doppler tomogram isn not in the trail,
 # most likely its not real!"
 cb2,cb3,dmr,dm = dop.Reco(colorbar=False,limits=[.05,0.95],cmaps=plt.cm.magma_r)
+
+
+
+from astropy.modeling import models, fitting
+res = plt.figure('Residuals',figsize=(8,4))
+plt.clf()
+ax = res.add_subplot(121)
+residuals = dm - dmr
+sigma = np.sqrt(dm)
+sh = plt.imshow(np.abs(residuals.T/sigma.T),aspect='auto',
+                vmin=0,vmax=6)
+cb = plt.colorbar(sh)
+ax = res.add_subplot(122)
+bb = plt.hist(residuals.flatten()/sigma.flatten(),bins=50,color='b',
+        histtype='step',normed=True)
+g_init = models.Gaussian1D(amplitude=.008, mean=0, stddev=50.)
+fit_g = fitting.LevMarLSQFitter()
+del_xx = bb[1][1:]-bb[1][1:2]
+g = fit_g(g_init, bb[1][:-1]+del_xx, bb[0])
+plt.plot(bb[1][1:], g(bb[1][1:]), label='Gaussian',color='green')
+ax2= ax.twinx()
+plt.hist(residuals.flatten(),bins=50,color='k',
+        histtype='step',cumulative=True,normed=True)
+plt.axvline(x=np.median(residuals.flatten()),
+            linestyle='--',color='r',alpha=0.6)
+plt.xlim(-6,6)
+plt.tight_layout()
