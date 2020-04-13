@@ -295,8 +295,9 @@
 
   ```python
   # plot trail spectra
-  cb2,cb3,dmr = dop.Reco(colorbar=True,limits=[.05,0.95],cmaps=cm.magma_r)
+  cb2,cb3,dmr,dm = dop.Reco(colorbar=True,limits=[.05,0.95],cmaps=cm.magma_r)
   ```
+  where the output variables cb2 and cb3 hold the colorbar objects (if selected); dmr and dm hold the data cubes for the reconstructed trail spectra and the binned data, respectively.
   <p align="middle">
      <img src="pydoppler/test_data/output_images/Reconstruction.png" width="520" height="450" />
   </p>
