@@ -19,6 +19,8 @@
   continuously. If you have any queries/comments/bug reports please send an e-mail to:
    * jvhs1 (at) st-andrews.ac.uk
 
+  ## Acknowledgment
+  
   If you make use of this software, please acknowledge the original code and this repository with the following citations:
    * Spruit 1998, arXiv, astro-ph/9806141 (https://ui.adsabs.harvard.edu/abs/1998astro.ph..6141S/abstract)
    * Hernandez Santisteban, 2021, ASCL, 6003 (https://ui.adsabs.harvard.edu/abs/2021ascl.soft06003H/abstract)
