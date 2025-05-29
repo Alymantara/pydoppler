@@ -21,7 +21,7 @@
 #compile=cp -f cclock.f clock.f ; g77 -O -fno-globals -Wno-globals
 #-fno-globals
 
-compile=cp -f cclock.f clock.f ; gfortran -O -w
+compile=cp -f cclock.f clock.f ; gfortran -O -w -fallow-argument-mismatch
 
 dop.out: dopin dop.in dopp
 	dopp
