@@ -1,7 +1,6 @@
 #! Python PyDoppler
 
 import numpy as np
-import imp
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from scipy.signal import savgol_filter
