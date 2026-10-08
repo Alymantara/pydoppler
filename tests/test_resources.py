@@ -24,16 +24,17 @@ def test_copy_fortran_code_respects_overwrite(tmp_path: Path):
     assert dop_f.read_text(encoding="utf-8") != "dummy"
 
 
-def test_fortran_makefile_keeps_gfortran_argument_mismatch_flag_optional(tmp_path: Path):
+def test_fortran_makefile_enables_checked_builds_without_suppressing_errors(tmp_path: Path):
     pydoppler.copy_fortran_code(tmp_path)
 
     makefile = (tmp_path / "makefile").read_text(encoding="utf-8")
 
     assert "FC = gfortran" in makefile
-    assert "FFLAGS = -O -w" in makefile
-    assert "ALLOW_ARGUMENT_MISMATCH ?=" in makefile
-    assert "compile=cp -f cclock.f clock.f ; $(FC) $(FFLAGS) $(ALLOW_ARGUMENT_MISMATCH)" in makefile
-    assert "gfortran -O -w -fallow-argument-mismatch" not in makefile
+    assert "-ffixed-line-length-none" in makefile
+    assert "-fcheck=all" in makefile
+    assert "FFLAGS = -O -w" not in makefile
+    assert "-fallow-argument-mismatch" not in makefile
+    assert "$(FC) $(FFLAGS)" in makefile
 
 
 def test_install_sample_script_avoids_overwrite(tmp_path: Path):

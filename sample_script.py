@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pydoppler
 
-# Set to True to save PDF figures and run without GUI windows.
+# Save PDF figures; SHOW_PLOTS below controls interactive display.
 SAVE_PDFS = True
 # Set to True to display figures interactively at the end.
 SHOW_PLOTS = False
@@ -31,17 +31,19 @@ def main() -> None:
     dop.object = 'U Gem'
     dop.base_dir = workdir / 'ugem99' # Base directory for input spectra
     dop.list = 'ugem0all.fas'		# Name of the input file
-    dop.lam0 = 6562.8 # Wavelength zero in units of the original spectra
-    dop.delta_phase = 0.003
-    dop.delw = 35	# size of Doppler map in wavelength
-    dop.overs = 0.3 # between 0-1, Undersampling of the spectra. 1= Full resolution
-    dop.gama = 36.0  # km /s
-    dop.nbins = 28
+    dop.lam0 = 6562.8  # Rest wavelength in Angstrom
+    dop.delta_phase = 0.003  # Full exposure width in orbital cycles
+    dop.delw = 35  # Rest-frame line-window half-width in Angstrom
+    dop.overs = 0.3  # Map pixels per axis / spectral velocity-channel count
+    dop.gama = 36.0  # Systemic redshift in km/s, removed before inversion
+    dop.nbins = 28  # Diagnostic phase bins; the inversion uses all exposures
 
     # Read in the individual spectra and orbital phase information
     dop.Foldspec()
 
-    # Normalise the spectra
+    # Subtract the continuum and resample onto a common velocity grid.
+    # This bundled dataset has no uncertainties: its fit is illustrative.
+    # Supply measured flux errors for weighted fits and calibrated diagnostics.
     dop.Dopin(
         continuum_band=[6500, 6537, 6591, 6620],
         plot_median=False,
@@ -63,21 +65,22 @@ def main() -> None:
         show=False,
     )
 
-    # Overplot the donor contours, keplerian and ballistic streams
-    qm=0.35
-    k1 = 107
-    inc=70
-    m1=1.2
-    porb=0.1769061911
+    # Overlay projected donor, Keplerian and ballistic velocities.
+    # K1 fixes the velocity scale; M1/P/q/i provide a consistency check.
+    qm=0.35  # M2/M1
+    k1 = 107  # Observed primary semi-amplitude in km/s
+    inc=70  # Degrees
+    m1=1.2  # Solar masses
+    porb=0.1769061911  # Days
 
     pydoppler.stream(qm,k1,porb,m1,inc)
 
-    # Always check that reconstructed spectra looks like the original one. A good
-    # rule of thumb "If a feature on the Doppler tomogram is not in the trail,
-    # most likely its not real!"
+    # Compare input and reconstructed trails on one common flux scale.
+    # Visual agreement alone is not a significance or uncertainty estimate;
+    # use residual diagnostics and synthetic recovery tests for interpretation.
     _cbar2, _cbar3, dmr, dm = dop.Reco(
         colorbar=True,
-        limits=[.05, 0.95],
+        limits=None,  # Shared scale includes the data and model ranges
         cmaps=plt.cm.magma,
         show=False,
     )

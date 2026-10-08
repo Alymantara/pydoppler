@@ -1,0 +1,3 @@
+include docs/scientific_conventions.md
+recursive-include docs/readme_images *.svg *.json
+recursive-include tests *.py

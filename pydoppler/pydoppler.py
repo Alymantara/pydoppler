@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Union
@@ -86,6 +85,12 @@ def _copy_tree(source, destination: Path, overwrite: bool = False) -> List[Path]
 
 @dataclass
 class DopplerOutput:
+    """Raw solver arrays and grids.
+
+    ``vp``, ``va`` and ``vmap`` are in km/s, phases and exposure widths in
+    cycles; ``gamma`` retains the input header's cm/s units. ``im`` uses
+    displayed [Vy, Vx] array order after the documented Fortran-axis exchange.
+    """
     path: Path
     nph: int
     nvp: int
@@ -96,6 +101,8 @@ class DopplerOutput:
     pha: np.ndarray
     dpha: np.ndarray
     vp: np.ndarray
+    va: float
+    vmap: np.ndarray
     dm: np.ndarray
     im: np.ndarray
     dmr: np.ndarray
@@ -173,6 +180,39 @@ def _set_mappable_norm(mappable, norm) -> None:
         mappable.norm = norm
 
 
+def _bin_edges(centers: np.ndarray) -> np.ndarray:
+    """Return midpoint bin edges from finite, strictly increasing centers."""
+    centers = np.asarray(centers, dtype=float)
+    if centers.ndim != 1 or centers.size < 2 or not np.all(np.isfinite(centers)):
+        raise ValueError("At least two finite one-dimensional bin centers are required.")
+    if np.any(np.diff(centers) <= 0):
+        raise ValueError("Bin centers must be strictly increasing.")
+    return np.concatenate(([centers[0] - (centers[1] - centers[0]) / 2],
+                           (centers[:-1] + centers[1:]) / 2,
+                           [centers[-1] + (centers[-1] - centers[-2]) / 2]))
+
+
+def _read_verified_dopout(path: Union[Path, str]) -> DopplerOutput:
+    """Reject stale/failed managed outputs before displaying their diagnostics."""
+    path = Path(path)
+    manifest_path = path.parent / "run.json"
+    if manifest_path.exists():
+        import hashlib
+        import json
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"Cannot verify managed output {path}.") from exc
+        if (not isinstance(manifest, dict) or manifest.get("success") is not True
+                or manifest.get("output_sha256") != digest):
+            raise RuntimeError(
+                f"Refusing previous, failed or unverified output {path}; "
+                "rerun Syncdop successfully before plotting."
+            )
+    return _parse_dopout(path)
+
+
 def _parse_dopout(dopout_path: Union[Path, str]) -> DopplerOutput:
     """Parse Spruit's ``dop.out`` output into structured NumPy arrays."""
 
@@ -220,22 +260,29 @@ def _parse_dopout(dopout_path: Union[Path, str]) -> DopplerOutput:
         except ValueError as exc:
             raise RuntimeError(f"Failed to parse {label} in {path}.") from exc
 
+    if nph < 1 or nvp < 2 or nv_header < 2:
+        raise RuntimeError(f"Invalid array dimensions in {path}.")
     pha = take_float_array(nph, "phase grid") / (2.0 * np.pi)
-    take(1, "phase-grid separator")
-    dpha = take_float_array(nph, "phase widths") / (2.0 * np.pi)
-    vp = take_float_array(nvp, "velocity grid")
-    if vp.size < 2:
-        raise RuntimeError(f"{path} must contain at least two velocity samples.")
-    dvp = vp[1] - vp[0]
-    vp = (vp - dvp / 2.0) / 1e5
+    iph = int(take(1, "exposure-width flag")[0])
+    dpha = (take_float_array(nph, "phase widths") / (2.0 * np.pi)
+            if iph == 1 else np.full(nph, 1.0 / nph))
+    # Fortran writes spectral bin centers, already corrected for gamma.
+    vp = take_float_array(nvp, "velocity grid") / 1e5
+    if not np.all(np.isfinite(vp)) or np.any(np.diff(vp) <= 0):
+        raise RuntimeError(f"Velocity centers must be finite and increasing in {path}.")
 
     dm = take_float_array(nvp * nph, "input trail").reshape(nvp, nph)
 
     try:
         params = take(14, "inversion parameters")
         nv = int(params[11])
+        va = float(params[12]) / 1e5
     except (IndexError, ValueError) as exc:
         raise RuntimeError(f"Failed to parse inversion parameters in {path}.") from exc
+
+    if nv < 2 or not np.isfinite(va) or va <= 0:
+        raise RuntimeError(f"Invalid Doppler map grid in {path}.")
+    vmap = np.linspace(-va, va, nv)
 
     im = take_float_array(nv * nv, "Doppler map").reshape(nv, nv)
     take(3, "reconstruction header")
@@ -259,6 +306,8 @@ def _parse_dopout(dopout_path: Union[Path, str]) -> DopplerOutput:
         pha=pha,
         dpha=dpha,
         vp=vp,
+        va=va,
+        vmap=vmap,
         dm=dm,
         im=im,
         dmr=dmr,
@@ -370,6 +419,7 @@ class spruit:
         self.delta_phase = 0.001
         self.flux_err = None
         self.normalised_flux_err = None
+        self.normalised_flux_covariance = None
 
         self.verbose = True
         self.interactive = interactive
@@ -388,19 +438,31 @@ class spruit:
         ####### Dop.in parameters
         self.ih = 0
         self.iw = 0
-        self.pb0 = 0.95
-        self.pb1 = 1.05
+        self.pb0 = 0.0
+        self.pb1 = 0.0
         self.ns = 7
         self.ac = 8e-4
-        self.nim = 150
+        self.nim = 1000
         self.al0 = 0.002
         self.alf = 1.7
         self.nal = 0
         self.clim = 1.6
         self.ipri = 2
-        self.norm = 1
+        self.norm = 0
+        self.conditional_normalization = False
         self.wid = 10e5
         self.af = 0.0
+        self.instrument_sigma = 0.0  # Gaussian LSF sigma in km/s, excluding pixel integration
+        self.phase_subsamples = 0  # 0 selects adaptive exposure quadrature
+        self.baseline_fraction = 0.1
+        self.covariance_mode = "full"
+        self.covariance_rcond = 1e-10
+        self.covariance_ranks = None
+        self.map_size = None  # otherwise use overs times the spectral channel count
+        self.run_timeout = 600.0
+        self.max_memory_bytes = 2_000_000_000
+        self.fit_diagnostics = None
+        self.valid_phase_mask = None
 
 
         # %%%%%%%%%%%%%%%%%%  Doppler Options   %%%%%%%%%%%%%%%%%%
@@ -502,8 +564,11 @@ class spruit:
 
         Individual spectrum files must contain at least two columns (wavelength,
         flux). A third column is interpreted as 1σ flux uncertainty and will be
-        propagated through the interpolation step.
+        propagated through the interpolation step. ``flux_covariance`` retains
+        the induced pixel covariance as compact objects with ``to_dense()``.
+        Native spectra are retained so :meth:`Dopin` can resample only once.
         """
+        from .preprocessing import SpectralCovariance, interpolation_operator
         list_path = Path(self.base_dir) / self.list
         if not list_path.exists():
             raise FileNotFoundError(
@@ -528,12 +593,16 @@ class spruit:
                     phase = float(parts[1])
                 except ValueError as exc:
                     raise ValueError(f"Invalid phase value in row: {line!r}") from exc
+                if not np.isfinite(phase):
+                    raise ValueError(f"Orbital phase must be finite: {line!r}")
                 dpha = None
                 if len(parts) >= 3:
                     try:
                         dpha = float(parts[2])
                     except ValueError as exc:
                         raise ValueError(f"Invalid exposure width value in row: {line!r}") from exc
+                    if not np.isfinite(dpha) or not 0 < dpha <= 1:
+                        raise ValueError(f"Exposure width must be in (0, 1] cycles: {line!r}")
                 rows.append((fname, phase, dpha))
 
         if not rows:
@@ -570,13 +639,12 @@ class spruit:
             if err is not None:
                 err = err[order]
 
-            finite = np.isfinite(wave) & np.isfinite(flux)
-            if err is not None:
-                finite &= np.isfinite(err)
-            wave = wave[finite]
-            flux = flux[finite]
-            if err is not None:
-                err = err[finite]
+            if not np.all(np.isfinite(wave)) or np.any(wave <= 0):
+                raise ValueError("Wavelength samples must be finite and positive.")
+            if not np.all(np.isfinite(flux)):
+                raise ValueError("Flux samples must be finite; mask bad pixels explicitly before loading.")
+            if err is not None and np.any((~np.isfinite(err)) | (err <= 0)):
+                raise ValueError("Supplied flux uncertainties must be finite and positive.")
             if wave.size < 2:
                 raise ValueError("Spectrum must contain at least two finite wavelength/flux samples.")
 
@@ -589,6 +657,8 @@ class spruit:
                     err2_sum = np.bincount(inv, weights=np.square(err))
                     err = np.sqrt(err2_sum) / counts
                 wave = uniq_wave
+            if wave.size < 2:
+                raise ValueError("Spectrum needs at least two distinct wavelengths.")
             return wave, flux, err
 
         loaded = []
@@ -661,13 +731,18 @@ class spruit:
 
         wave: List[np.ndarray] = []
         flux: List[np.ndarray] = []
+        flux_covariance = []
         for _, w, f, e in loaded:
-            wave.append(wo)
-            flux.append(np.interp(wo, w, f))
+            wave.append(wo.copy())
+            sampling = interpolation_operator(w, wo)
+            flux.append(sampling.apply(f))
             if e is None:
                 flux_err.append(None)
+                flux_covariance.append(None)
             else:
-                flux_err.append(np.sqrt(np.interp(wo, w, np.square(e))))
+                covariance = SpectralCovariance(np.square(e), sampling)
+                flux_err.append(np.sqrt(covariance.diagonal()))
+                flux_covariance.append(covariance)
 
         self.wave = wave
         self.flux = flux
@@ -680,17 +755,24 @@ class spruit:
             self.flux_err = flux_err
         else:
             self.flux_err = None
+        self.flux_covariance = flux_covariance
+        self._foldspec_covariance_snapshot = tuple(flux_covariance)
+        self._native_spectra = [(w.copy(), f.copy(), None if e is None else e.copy())
+                                for _, w, f, e in loaded]
+        self._foldspec_wave_snapshot = [w.copy() for w in self.wave]
+        self._foldspec_flux_snapshot = np.asarray(self.flux).copy()
+        self._foldspec_error_snapshot = [None if e is None else e.copy() for e in flux_err]
 
 
     def _auto_continuum_band(self) -> Sequence[float]:
         """Derive continuum windows for non-interactive use.
 
-        The routine samples the outer 5% of the wavelength coverage on both
+        The routine samples the outer 5% (at least four samples) on both
         sides of the line and returns two intervals suitable for the continuum
         polynomial fit used in :meth:`Dopin`.
         """
 
-        if not self.wave or not self.wave[0].size:
+        if np.ndim(self.wave) == 0 or not len(self.wave) or not np.size(self.wave[0]):
             raise RuntimeError(
                 "Wavelength grid is empty. Run 'Foldspec' before calling 'Dopin'."
             )
@@ -699,7 +781,7 @@ class spruit:
         if wave.size < 8:
             raise ValueError("Cannot determine continuum bands from fewer than eight samples.")
 
-        window = max(3, int(round(0.05 * wave.size)))
+        window = max(4, int(round(0.05 * wave.size)))
         left = wave[:window]
         right = wave[-window:]
 
@@ -728,6 +810,7 @@ class spruit:
         plot: Optional[bool] = None,
         show: Optional[bool] = None,
         continuum_band: Optional[Sequence[float]] = None,
+        flux_covariance=None,
     ):
         """Continuum-subtract spectra and write the Fortran input file ``dopin``.
 
@@ -741,7 +824,7 @@ class spruit:
         poly_degree:
             Polynomial degree for the continuum fit.
         continuum_band:
-            Four wavelength limits ``[x1, x2, x3, x4]`` defining two continuum
+            Four observed-frame wavelength limits ``[x1, x2, x3, x4]`` defining two continuum
             windows ``(x1, x2)`` and ``(x3, x4)``. When omitted, windows are
             selected automatically if ``interactive`` is disabled, or chosen
             interactively when ``interactive=True``.
@@ -749,7 +832,12 @@ class spruit:
             Legacy alias for ``continuum_band`` (kept for backward compatibility).
         flux_err:
             Optional 1σ uncertainties with shape ``(nspec, nwave)`` matching the
-            output of :meth:`Foldspec`.
+            output of :meth:`Foldspec`. Explicitly supplied errors are assumed
+            independent unless ``flux_covariance`` is also supplied.
+        flux_covariance:
+            Optional per-spectrum covariance matrices on the loaded wavelength
+            grid. Compact covariance objects returned by :meth:`Foldspec` are
+            also accepted. Overrides inferred native-pixel covariance.
         estimate_errors:
             When ``True`` (default) and ``iw==1``, missing/invalid uncertainties
             are estimated from continuum residuals.
@@ -773,8 +861,41 @@ class spruit:
         ``nbins`` only affects the diagnostic trail plot binning; the inversion
         uses all spectra/phases written to ``dopin``.
         """
-        if not self.wave:
+        from .preprocessing import (
+            DenseSpectralCovariance, SpectralCovariance, array_digest, covariance_digest,
+            estimate_continuum_sigma,
+            subtract_continuum_and_resample,
+        )
+
+        if np.ndim(self.wave) == 0 or len(self.wave) == 0:
             raise RuntimeError("No spectra loaded. Run 'Foldspec' before normalising.")
+        wave0 = np.asarray(self.wave[0], dtype=float)
+        input_flux = np.asarray(self.flux, dtype=float)
+        if (wave0.ndim != 1 or wave0.size < 2 or not np.all(np.isfinite(wave0))
+                or np.any(wave0 <= 0) or np.any(np.diff(wave0) <= 0)):
+            raise ValueError("Loaded wavelength grid must be finite, positive, and strictly increasing.")
+        if (input_flux.ndim != 2 or input_flux.shape[1] != wave0.size
+                or not np.all(np.isfinite(input_flux)) or not len(input_flux)):
+            raise ValueError("Loaded flux must be a finite array with shape (nspec, nwave).")
+        if any(not np.array_equal(w, wave0) for w in self.wave):
+            raise ValueError("Loaded spectra must share a wavelength grid; run Foldspec first.")
+        phases = np.asarray(self.input_phase, dtype=float)
+        if phases.shape != (len(input_flux),) or not np.all(np.isfinite(phases)):
+            raise ValueError("Input phases must be finite with one value per spectrum.")
+        self.pha = phases.copy()
+        if (isinstance(poly_degree, bool) or not isinstance(poly_degree, (int, np.integer))
+                or poly_degree < 0):
+            raise ValueError("poly_degree must be a non-negative integer.")
+        if not np.isfinite(self.delta_phase) or not 0 < self.delta_phase <= 1:
+            raise ValueError("delta_phase must be in (0, 1] orbital cycles.")
+        if not np.isfinite(self.lam0) or self.lam0 <= 0:
+            raise ValueError("lam0 must be finite and positive.")
+        if not np.isfinite(self.delw) or self.delw <= 0:
+            raise ValueError("delw must be finite and positive.")
+        if not np.isfinite(self.gama) or abs(self.gama) >= 2.99792458e5:
+            raise ValueError("Systemic velocity 'gama' must be finite and satisfy |gama| < c.")
+        if rebin_wave is not None and rebin_wave != 0:
+            raise ValueError("rebin_wave is not implemented; use the native diagnostic wavelength sampling.")
 
         log = self._log
         if verbose is not None:
@@ -786,11 +907,12 @@ class spruit:
                     print(message)
 
         if continuum_band is not None:
-            if continnum_band not in (False, None):
+            if continnum_band is not False and continnum_band is not None:
                 raise TypeError(
                     "Pass only one of 'continnum_band' (legacy) or 'continuum_band'."
                 )
             continnum_band = continuum_band
+        has_continuum = continnum_band is not False and continnum_band is not None
 
         if plot is None:
             plot = bool(self.plot)
@@ -798,34 +920,33 @@ class spruit:
             show = bool(plot)
 
         plt = None
-        if plot or (self.interactive and not continnum_band):
+        if plot or (self.interactive and not has_continuum):
             _, plt = _lazy_import_matplotlib_pyplot()
-        elif self.interactive and not continnum_band:
+        elif self.interactive and not has_continuum:
             raise RuntimeError(
                 "Interactive continuum selection requires plotting; set plot=True."
             )
 
         lam=self.lam0
         cl=2.99792458e5
+        systemic_factor = np.sqrt((1. + self.gama / cl) / (1. - self.gama / cl))
+        observed_line_center = lam * systemic_factor
 
         cmaps = plt.cm.binary_r if plt is not None else None  # noqa: F841
 
         wmin = float(np.min(self.wave[0]))
         wmax = float(np.max(self.wave[0]))
-        if lam < wmin or lam > wmax:
+        if observed_line_center < wmin or observed_line_center > wmax:
             raise ValueError(
-                f"Input wavelength {lam} Å out of bounds. Must be between {wmin} and {wmax}."
+                f"Systemic-velocity shifted line center {observed_line_center} Å is out of "
+                f"bounds. Must be between {wmin} and {wmax}."
             )
-        ss=0
-        for i in np.arange(len(self.wave[0])-1):
-            if lam >= self.wave[0][i]   and lam <= self.wave[0][i+1]:
-                ss=i
 
 
         avgspec=np.sum(self.flux,axis=0)
         continuum_fig = None
         continuum_ax = None
-        if plot and plt is not None and self.interactive and not continnum_band:
+        if plot and plt is not None and self.interactive and not has_continuum:
             continuum_fig = plt.figure(num="Continuum Selection", figsize=(6.57, 4.0))
             plt.clf()
             continuum_ax = continuum_fig.add_subplot(111)
@@ -833,7 +954,7 @@ class spruit:
             continuum_ax.set_xlabel(r'Wavelength / $\AA$')
             continuum_ax.set_ylabel('Input flux')
 
-        if not continnum_band:
+        if not has_continuum:
             if self.interactive:
                 if plt is None:
                     raise RuntimeError(
@@ -868,8 +989,8 @@ class spruit:
             xor=[float(v) for v in continnum_band]
             if len(xor) != 4:
                 raise ValueError("continuum_band must contain four wavelength limits.")
-            if xor[0] >= xor[1] or xor[2] >= xor[3]:
-                raise ValueError("Each continuum interval must be strictly increasing.")
+            if not np.all(np.isfinite(xor)) or np.any(np.diff(xor) <= 0):
+                raise ValueError("Continuum limits must be finite, increasing, and non-overlapping.")
             if continuum_ax is not None:
                 for idx,val in enumerate(xor):
                     label='Cont Bands' if idx == 0 else ''
@@ -893,134 +1014,131 @@ class spruit:
             continuum_ax.set_xlim(xor[0]-10, xor[3]+10)
             continuum_fig.tight_layout()
 
-        ######## Do individual fit on the blaze
-        err_input = None
-        if flux_err is not None:
-            err_input = np.asarray(flux_err, dtype=float)
-            if err_input.shape != (len(self.flux), len(self.wave[0])):
-                raise ValueError(
-                    "flux_err must have shape (nspec, nwave) matching the loaded spectra."
-                )
-        elif self.flux_err is not None:
-            try:
-                err_input = np.vstack(
-                    [
-                        np.full_like(self.wave[0], np.nan) if e is None else np.asarray(e, dtype=float)
-                        for e in self.flux_err
-                    ]
-                )
-            except Exception:  # pragma: no cover - defensive
-                err_input = None
+        beta = self.gama / cl
+        nufac = np.sqrt((1.0 + beta) / (1.0 - beta))
+        rest_wave = wave0 / nufac
+        region = (rest_wave > self.lam0 - self.delw) & (rest_wave < self.lam0 + self.delw)
+        if np.count_nonzero(region) < 2:
+            raise ValueError(
+                "No spectral samples fall inside the Doppler-map wavelength window "
+                "(lam0 ± delw) after gamma correction."
+            )
+        ratios = rest_wave[region] / self.lam0
+        velocities = cl * (ratios**2 - 1.) / (ratios**2 + 1.)
+        self.vell = np.linspace(velocities[0], velocities[-1], len(velocities))
+        self.normalised_wave = self.lam0 * np.sqrt((1. + self.vell / cl) / (1. - self.vell / cl))
+        observed_target = self.normalised_wave * nufac
 
-        def _estimate_per_spectrum_sigma() -> np.ndarray:
-            beta = self.gama / cl
-            if abs(beta) >= 1:
-                raise ValueError("Systemic velocity 'gama' must satisfy |gama| < c.")
-            nufac = np.sqrt((1.0 + beta) / (1.0 - beta))
-            per_spec_sigma = []
-            for flu in self.flux:
-                polmask = ((self.wave[0]/nufac > xor[0]) * (self.wave[0]/nufac < xor[1])) + (
-                    (self.wave[0]/nufac > xor[2]) * (self.wave[0]/nufac < xor[3])
-                )
-                if np.count_nonzero(polmask) < max(10, poly_degree + 2):
-                    per_spec_sigma.append(np.nan)
-                    continue
-                wave_fit = self.wave[0][polmask] / nufac
-                try:
-                    z = np.polyfit(wave_fit, flu[polmask], poly_degree)
-                except Exception:
-                    per_spec_sigma.append(np.nan)
-                    continue
-                pz = np.poly1d(z)
-                resid = flu[polmask] - pz(wave_fit)
-                per_spec_sigma.append(float(np.nanstd(resid)))
-            sigma = np.asarray(per_spec_sigma, dtype=float)
-            good = np.isfinite(sigma) & (sigma > 0)
-            fill = float(np.nanmedian(sigma[good])) if np.any(good) else 1.0
-            sigma[~good] = fill
-            return sigma
+        def same_errors(current, previous):
+            if current is None:
+                return all(value is None for value in previous)
+            if not hasattr(current, "__len__") or len(current) != len(previous):
+                return False
+            return all(
+                (x is None and y is None) or
+                (x is not None and y is not None and np.array_equal(x, y))
+                for x, y in zip(current, previous)
+            )
 
-        # When iw=1 we want to write error bars into the dopin file. If the user
-        # didn't provide them (or they are incomplete), estimate from the
-        # continuum regions to make automated runs possible.
-        if self.iw == 1:
-            if err_input is None:
-                if not estimate_errors:
-                    raise RuntimeError(
-                        "iw=1 requests error bars, but none were provided. "
-                        "Pass flux_err=... to Dopin() or set estimate_errors=True."
-                    )
-                sigma = _estimate_per_spectrum_sigma()
-                err_input = np.vstack([np.full_like(self.wave[0], s) for s in sigma])
-                log(
-                    logging.INFO,
-                    "Estimated per-spectrum uncertainties from continuum residuals.",
-                )
+        wave_unchanged = (
+            hasattr(self, "_foldspec_wave_snapshot") and
+            len(self.wave) == len(self._foldspec_wave_snapshot) and
+            all(np.array_equal(x, y) for x, y in zip(self.wave, self._foldspec_wave_snapshot))
+        )
+        errors_unchanged = (
+            hasattr(self, "_foldspec_error_snapshot") and
+            same_errors(self.flux_err, self._foldspec_error_snapshot)
+        )
+        covariance_unchanged = (
+            hasattr(self, "_foldspec_covariance_snapshot") and
+            len(self.flux_covariance) == len(self._foldspec_covariance_snapshot) and
+            all(x is y for x, y in zip(self.flux_covariance, self._foldspec_covariance_snapshot))
+        )
+        use_native = (
+            flux_err is None and flux_covariance is None and wave_unchanged and
+            errors_unchanged and covariance_unchanged and
+            np.array_equal(input_flux, self._foldspec_flux_snapshot)
+        )
+        if use_native:
+            sources = self._native_spectra
+            source_covariances = [None] * len(sources)
+        else:
+            errors = self.flux_err if flux_err is None else np.asarray(flux_err, dtype=float)
+            if errors is not None:
+                if not hasattr(errors, "__len__") or len(errors) != len(input_flux) or any(
+                    e is not None and np.asarray(e).shape != wave0.shape for e in errors
+                ):
+                    raise ValueError("flux_err must have shape (nspec, nwave) matching the loaded spectra.")
+            sources = [(wave0, f, None if errors is None else errors[i])
+                       for i, f in enumerate(input_flux)]
+            if flux_covariance is not None:
+                if len(flux_covariance) != len(sources):
+                    raise ValueError("flux_covariance must contain one matrix per spectrum.")
+                source_covariances = [
+                    c if isinstance(c, (SpectralCovariance, DenseSpectralCovariance))
+                    else DenseSpectralCovariance(c) for c in flux_covariance
+                ]
+                if any(c.shape != (len(wave0), len(wave0)) for c in source_covariances):
+                    raise ValueError("Each flux covariance must match the loaded wavelength grid.")
+            elif flux_err is None and errors_unchanged and hasattr(self, "flux_covariance"):
+                source_covariances = self.flux_covariance
+                if any(c is not None and c.shape != (len(wave0), len(wave0))
+                       for c in source_covariances):
+                    raise ValueError("Changed wavelength sampling requires matching flux covariance.")
             else:
-                err_input = np.asarray(err_input, dtype=float)
-                bad = (~np.isfinite(err_input)) | (err_input <= 0)
-                if np.any(bad):
-                    if estimate_errors:
-                        sigma = _estimate_per_spectrum_sigma()
-                        for ct in range(err_input.shape[0]):
-                            err_input[ct][bad[ct]] = sigma[ct]
-                        log(
-                            logging.INFO,
-                            "Filled missing/invalid uncertainties using continuum residual estimates.",
-                        )
-                    else:
-                        for ct in range(err_input.shape[0]):
-                            good = np.isfinite(err_input[ct]) & (err_input[ct] > 0)
-                            fill = float(np.nanmedian(err_input[ct][good])) if np.any(good) else 1.0
-                            err_input[ct][bad[ct]] = fill
+                source_covariances = [None] * len(sources)
+                if flux_err is not None and hasattr(self, "_native_spectra"):
+                    log(logging.WARNING,
+                        "Explicit common-grid flux_err assumes independent pixels; pass "
+                        "flux_covariance to retain correlations from previous resampling.")
 
-            positive = np.isfinite(err_input) & (err_input > 0)
-            floor = float(np.nanmedian(err_input[positive]) * 1e-6) if np.any(positive) else 1e-12
-            if floor <= 0 or not np.isfinite(floor):
-                floor = 1e-12
-            err_input = np.clip(err_input, a_min=floor, a_max=None)
-
-        for ct,flu in enumerate(self.flux):
-            #print(lop.sum)
-            if ct == 0 :
-                beta = self.gama / cl
-                if abs(beta) >= 1:
-                    raise ValueError("Systemic velocity 'gama' must satisfy |gama| < c.")
-                nufac = np.sqrt((1.0 + beta) / (1.0 - beta))
-                lop = (self.wave[0]/nufac > self.lam0 - self.delw) * \
-                      (self.wave[0]/nufac < self.lam0 + self.delw)
-                if np.count_nonzero(lop) < 2:
-                    raise ValueError(
-                        "No spectral samples fall inside the Doppler-map wavelength window "
-                        "(lam0 ± delw) after gamma correction. Increase 'delw' or verify "
-                        "'lam0'/'gama' and the wavelength grid."
-                    )
-                self.normalised_wave = np.array(self.wave[0][lop]/nufac)
-                # Interpolate in velocity space
-                vell_temp=((self.normalised_wave/self.lam0)**2-1.0)*cl/(1.0 + \
-                         (self.normalised_wave/self.lam0)**2)
-                self.vell = np.linspace(vell_temp[0],vell_temp[-1],vell_temp.size)
-                self.normalised_flux = np.zeros((len(self.flux),lop.sum()))
-                if err_input is not None:
-                    self.normalised_flux_err = np.zeros((len(self.flux), lop.sum()))
-
-            polmask = ((self.wave[0]/nufac>xor[0]) * (self.wave[0]/nufac<xor[1])) +\
-                  ((self.wave[0]/nufac>xor[2]) * (self.wave[0]/nufac<xor[3]))
-            if np.count_nonzero(polmask) < max(poly_degree + 1, 3):
-                raise ValueError(
-                    f"Continuum windows contain too few samples for spectrum index {ct}."
-                )
-            z = np.polyfit(self.wave[0][polmask]/nufac, flu[polmask], poly_degree)
-            pz = np.poly1d(z)
-            linfit = pz(self.normalised_wave)
-
-            self.normalised_flux[ct] = np.array(flu[lop]) - np.array(linfit)
-            self.normalised_flux[ct] = np.interp(self.vell,vell_temp,self.normalised_flux[ct])
-            if self.normalised_flux_err is not None and err_input is not None:
-                sigma = np.asarray(err_input[ct], dtype=float)
-                sigma_roi = np.square(sigma[lop])
-                sigma_vel = np.interp(self.vell, vell_temp, sigma_roi)
-                self.normalised_flux_err[ct] = np.sqrt(np.clip(sigma_vel, a_min=0.0, a_max=None))
+        output_flux, output_covariance, source_records = [], [], []
+        for index, ((wave, flu, errors), covariance) in enumerate(zip(sources, source_covariances)):
+            wave, flu = np.asarray(wave, dtype=float), np.asarray(flu, dtype=float)
+            noise_source = ("explicit_covariance" if flux_covariance is not None
+                            else "propagated_input_covariance") if covariance is not None else "unavailable"
+            if covariance is None:
+                if errors is not None:
+                    noise_source = "provided_standard_deviations"
+                    errors = np.asarray(errors, dtype=float).copy()
+                    bad = (~np.isfinite(errors)) | (errors <= 0)
+                    if np.any(bad):
+                        if not estimate_errors:
+                            raise ValueError("Flux uncertainties must be finite and positive when estimate_errors=False.")
+                        sigma = estimate_continuum_sigma(wave, flu, xor, poly_degree)
+                        errors[bad] = sigma
+                        noise_source = "provided_errors_with_continuum_fill"
+                        log(logging.INFO, f"Estimated missing uncertainties for spectrum {index} from continuum residuals.")
+                elif self.iw in (1, 2):
+                    if not estimate_errors:
+                        raise RuntimeError("Weighted inversion requires flux errors or covariance; estimate_errors=False.")
+                    sigma = estimate_continuum_sigma(wave, flu, xor, poly_degree)
+                    errors = np.full(len(wave), sigma)
+                    noise_source = "continuum_residual_homoscedastic_estimate"
+                    log(logging.INFO, f"Estimated spectrum {index} uncertainties from continuum residuals.")
+                if errors is not None:
+                    covariance = SpectralCovariance(np.square(errors))
+            source_records.append({
+                "spectrum_index": index,
+                "samples": len(wave),
+                "wavelength_sha256": array_digest(wave),
+                "flux_sha256": array_digest(flu),
+                "noise_source": noise_source,
+                "covariance_representation_sha256": covariance_digest(covariance),
+            })
+            values, propagated = subtract_continuum_and_resample(
+                wave, flu, observed_target, xor, poly_degree, covariance,
+            )
+            output_flux.append(values)
+            output_covariance.append(propagated)
+        self.normalised_flux = np.asarray(output_flux)
+        self.normalised_flux_covariance = output_covariance
+        self.normalised_flux_err = (
+            np.vstack([np.sqrt(c.diagonal()) if c is not None else np.full(len(self.vell), np.nan)
+                       for c in output_covariance])
+            if any(c is not None for c in output_covariance) else None
+        )
+        self.preprocessing_used_native = use_native
 
         log(
             logging.INFO,
@@ -1028,91 +1146,68 @@ class spruit:
         )
 
 
-        self.pha = self.input_phase
+        self.pha = phases % 1.0
         self.trsp = self.normalised_flux
-        #print(">> SHAPES = ",self.pha.shape,self.trsp.shape)
-        ## Phases of individual spectra
-        #print("LAM_SIZE= {}, VELL_SIZE={}".format(self.normalised_wave.size,self.vell.size))
+        if use_list_dpha:
+            if self.input_dpha is None:
+                raise ValueError("use_list_dpha=True requires exposure widths in the phase file.")
+            dpha = np.asarray(self.input_dpha, dtype=float)
+            if (dpha.shape != (self.pha.size,) or not np.all(np.isfinite(dpha))
+                    or np.any(dpha <= 0) or np.any(dpha > 1)):
+                raise ValueError("input_dpha must contain one finite width in (0, 1] per spectrum.")
+        else:
+            dpha = np.full(self.pha.size, float(self.delta_phase))
+        self.used_dpha = dpha.copy()
         self.workdir.mkdir(parents=True, exist_ok=True)
         dopin_path = self.workdir / "dopin"
-        f=open(dopin_path,'w')
-        f.write("{:8.0f}{:8.0f}{:13.2f}\n".format(self.pha.size,
-                                        self.vell.size,
-                                        self.lam0))
-#        f.write(str(len(self.flux))+" "+str(self.nbins)+" "+str(self.lam0)+'\n')
-        list_path = Path(self.base_dir) / self.list
-        f.write("{:13.5f}{:8.0f}{:8.0f}    {:}\n".format(self.gama*1e5,0,0,
-                                                str(list_path)))
-        ctr = 0
-        for pp in self.pha:
-                if ctr <5:
-                    f.write("{:13.6f}".format(pp))
-                    ctr +=1
-                else:
-                    f.write("{:13.6f}\n".format(pp))
-                    ctr=0
-        f.write("\n{:8.0f}\n".format(1))
-        ctr = 0
+        with dopin_path.open("w", encoding="utf-8") as handle:
+            handle.write(f"{self.pha.size:d} {self.vell.size:d} {self.lam0:.16e}\n")
+            list_path = Path(self.base_dir) / self.list
+            handle.write(f"{self.gama * 1e5:.16e} 0 0 {list_path}\n")
 
-        if use_list_dpha and self.input_dpha is not None:
-            dpha = np.asarray(self.input_dpha, dtype=float)
-            if dpha.shape != (self.pha.size,):
-                raise ValueError("input_dpha must have shape (nph,) to be written to dopin.")
-            bad = (~np.isfinite(dpha)) | (dpha <= 0)
-            if np.any(bad):
-                dpha = dpha.copy()
-                dpha[bad] = float(self.delta_phase)
-        else:
-            dpha = np.ones(self.pha.size, dtype=float) * float(self.delta_phase)
+            def write_values(values):
+                flat = np.asarray(values).ravel()
+                for start in range(0, len(flat), 6):
+                    handle.write(" ".join(f"{value:.16e}" for value in flat[start:start + 6]) + "\n")
 
-        for pp in dpha:
-                if ctr <5:
-                    f.write("{:13.6f}".format(pp))
-                    ctr +=1
-                else:
-                    f.write("{:13.6f}\n".format(pp))
-                    ctr=0
-        if ctr != 0: f.write("\n")
-        ##
-        ctr = 0
-        for pp in self.vell:
-                #print('velo size:',len(vell))
-                if ctr <5:
-                    f.write("{:13.5e}".format(pp*1e5))
-                    ctr +=1
-                else:
-                    f.write("{:13.5e}\n".format(pp*1e5))
-                    ctr=0
-        if ctr != 0: f.write("\n")
-        ctr = 0
+            write_values(self.pha)
+            handle.write("1\n")
+            write_values(dpha)
+            write_values(self.vell * 1e5)
+            write_values(self.trsp.T)
+            if self.iw in (1, 2):
+                if (self.normalised_flux_err is None or
+                        np.any(~np.isfinite(self.normalised_flux_err)) or
+                        np.any(self.normalised_flux_err <= 0)):
+                    raise ValueError("Weighted inversion requires positive propagated uncertainties.")
+                write_values(self.normalised_flux_err.T)
 
-        # Where we write the normalised flux
-        for pp in np.array(self.trsp.T).flatten():
-                if ctr <5:
-                    f.write("{:13.5f}".format(pp))
-                    ctr +=1
-                else:
-                    f.write("{:13.5f}\n".format(pp))
-                    ctr=0
-        if ctr != 0: f.write("\n")
-
-        if self.iw == 1:
-            if self.normalised_flux_err is None:
-                raise RuntimeError(
-                    "iw=1 requests error bars, but none are available. "
-                    "Pass flux_err=... to Dopin() or set estimate_errors=True."
-                )
-            ctr = 0
-            for pp in np.array(self.normalised_flux_err.T).flatten():
-                if ctr < 5:
-                    f.write("{:13.5f}".format(pp))
-                    ctr += 1
-                else:
-                    f.write("{:13.5f}\n".format(pp))
-                    ctr = 0
-            if ctr != 0:
-                f.write("\n")
-        f.close()
+        # This is bounded preprocessing provenance, not a claim to record
+        # upstream calibration, ephemeris construction, or observing metadata.
+        import hashlib
+        import json
+        provenance = {
+            "schema_version": 1,
+            "dopin_sha256": hashlib.sha256(dopin_path.read_bytes()).hexdigest(),
+            "continuum_frame": "observed_wavelength",
+            "continuum_bands_angstrom": [float(value) for value in xor],
+            "continuum_polynomial_degree": int(poly_degree),
+            "rest_wavelength_angstrom": float(self.lam0),
+            "systemic_velocity_km_s": float(self.gama),
+            "rest_frame_window_half_width_angstrom": float(self.delw),
+            "velocity_definition": "longitudinal_relativistic",
+            "interpolation": "linear_flux_density_samples",
+            "source_grid": "native" if use_native else "loaded_common",
+            "estimate_errors_enabled": bool(estimate_errors),
+            "error_estimator": "continuum_residual_standard_deviation_with_residual_dof",
+            "covariance_propagation": "composed_sampling_and_weighted_continuum_fit",
+            "phase_sha256": array_digest(self.pha),
+            "exposure_width_sha256": array_digest(dpha),
+            "sources": source_records,
+        }
+        (self.workdir / "dopin.json").write_text(
+            json.dumps(provenance, indent=2, allow_nan=False) + "\n", encoding="utf-8",
+        )
 
         if not plot or plt is None:
             return
@@ -1132,9 +1227,10 @@ class spruit:
             )
             phase_pad = 1.0 / self.nbins
         else:
-            order = np.argsort(self.input_phase)
-            phase_once = np.asarray(self.input_phase, dtype=float)[order]
-            trail_once = np.asarray(self.normalised_flux, dtype=float)[order].T
+            phase_once, inverse = np.unique(self.pha, return_inverse=True)
+            trail_once = np.zeros((len(self.vell), len(phase_once)))
+            for index in range(len(phase_once)):
+                trail_once[:, index] = np.mean(self.normalised_flux[inverse == index], axis=0)
             if two_orbits:
                 phase = np.concatenate([phase_once, phase_once + 1.0])
                 trail = np.concatenate([trail_once, trail_once], axis=1)
@@ -1146,59 +1242,14 @@ class spruit:
             phase_pad = float(np.nanmedian(diffs)) if diffs.size else 1.0 / self.nbins
 
 
-        if xlim == None:
+        if xlim is None:
             rr = np.ones(self.normalised_wave.size,dtype='bool')
         else:
+            if len(xlim) != 2 or not np.all(np.isfinite(xlim)) or xlim[0] >= xlim[1]:
+                raise ValueError("xlim must contain two finite, increasing rest-frame wavelengths.")
             rr = (self.normalised_wave > xlim[0]) & (self.normalised_wave < xlim[1])
-
-        if rebin_wave == 0:
-            waver = self.normalised_wave[rr]
-        else:
-            dw = (self.normalised_wave[rr][1] - self.normalised_wave[rr][0]) *\
-                                                 rebin_wave
-            log(logging.DEBUG, f"Rebin step {dw} ({dw/rebin_wave})")
-            waver = np.arange(self.normalised_wave[rr][0],
-                              self.normalised_wave[rr][-1],dw )
-        """
-        trail = np.zeros((waver.size,phase.size))
-
-        tots = trail.copy()
-        #print(phases.size)
-        for i in range(self.input_phase.size):
-            #print("spec phase = ",grid['phase'][i])
-            dist = phase_dec - (self.input_phase[i]+self.delta_phase/2.)
-            #print(dist)
-            dist[np.abs(dist)>1./self.nbins] = 0.
-            #print(dist/delpha)
-            dist[dist>0] = 0.0
-            #print(dist)
-            weights = np.abs(dist)/(1./self.nbins)
-            #print(weights)
-            #print('---------------')
-            dist = phase_dec - (self.input_phase[i]-self.delta_phase/2.)
-            #print(dist)
-            dist[np.abs(dist)>1./self.nbins] = 0.0
-            #print(dist)
-            dist[dist>0] = 0.0
-            #print(dist/delpha)
-            dist[np.abs(dist)>0] = 1.0 - (np.abs(dist[np.abs(dist)>0]))/(1./self.nbins)
-            weights += dist
-            #print(weights)
-            temp = trail.copy().T
-
-            for j in range(phase.size):
-                if rebin_wave == 0:
-                    temp[j] =  self.normalised_flux[i][rr] * weights[j]
-                    temp[j] =  self.normalised_flux[i][rr] * weights[j]
-                else:
-                    temp[j] = np.interp(waver,wave[rr],
-                              self.normalised_flux[i][rr]) * weights[j]
-                    temp[j] = np.interp(waver,wave[rr],
-                              self.normalised_flux[i][rr]) * weights[j]
-            trail+=temp.T
-            tots += weights
-        trail /= tots
-        """
+            if not np.any(rr):
+                raise ValueError("xlim contains no output wavelengths.")
 
         if vel_space:
             x1_lim = float(np.nanmin(self.vell))
@@ -1214,6 +1265,8 @@ class spruit:
             display_xlim = (self.lam0 - self.delw, self.lam0 + self.delw)
             xlabel = 'Wavelength / $\\AA$'
             center = self.lam0
+        if xlim is not None:
+            display_xlim = (float(profile_x[rr].min()), float(profile_x[rr].max()))
 
         fig = plt.figure('Trail',figsize=(6.57,8.57))
         plt.clf()
@@ -1229,7 +1282,7 @@ class spruit:
         ax1.axhline(y=0, ls='--', color='k', alpha=0.7)
         ax1.axvline(x=center, ls='--', color='DarkOrange')
         ax1.set_xlim(*display_xlim)
-        ax1.set_ylabel('Bkg subtracted Flux')
+        ax1.set_ylabel('Continuum-subtracted flux')
         ax1.set_xticklabels([])
 
         ax2 = plt.subplot2grid((6, 1), (2, 0), rowspan=4)
@@ -1237,10 +1290,12 @@ class spruit:
         trail_cmap = plt.cm.binary.copy() if hasattr(plt.cm.binary, "copy") else plt.cm.binary
         if hasattr(trail_cmap, "set_bad"):
             trail_cmap.set_bad(color="0.85")
-        img = ax2.imshow(
-            trail.T, interpolation='nearest', cmap=trail_cmap, aspect='auto',
-            origin='lower', extent=(x1_lim, x2_lim, phase[0], phase[-1] + phase_pad)
-        )
+        if len(phase) == 1:
+            phase_edges = np.array([phase[0] - phase_pad / 2., phase[0] + phase_pad / 2.])
+        else:
+            phase_edges = _bin_edges(phase)
+        ax2.pcolormesh(_bin_edges(profile_x), phase_edges, trail.T,
+                       cmap=trail_cmap, shading='flat')
         ax2.set_xlim(*display_xlim)
         ax2.set_xlabel(xlabel)
         ax2.axvline(x=center, ls='--', color='DarkOrange')
@@ -1250,9 +1305,9 @@ class spruit:
                 lim_two = 2
             else:
                 lim_two = 1
-            ax2.set_ylim(phase[0], lim_two + 1 / self.nbins / 2.0)
+            ax2.set_ylim(0., lim_two)
         else:
-            ax2.set_ylim(phase[0], phase[-1] + phase_pad / 2.0)
+            ax2.set_ylim(phase_edges[0], phase_edges[-1])
         ax2.set_ylabel('Orbital Phase')
         fig.tight_layout(h_pad=0)
         if show:
@@ -1260,265 +1315,43 @@ class spruit:
 
 
 
-    def Syncdop(self,nri=0.9,ndi=0.7):
-        '''
-        Runs the fortran code dopp, using the output files from dopin.
+    def Syncdop(self, nri=0.9, ndi=0.7):
+        """Build and execute the solver, returning validated fit diagnostics.
 
-        This routine requires the Fortran sources (``dop.f``, ``emap_ori.par``,
-        and ``makefile``) to be present in ``self.workdir`` and relies on
-        external tooling (``make`` and ``gfortran``).
-        '''
-        work_dir = self.workdir
-        required_files = ("dopin", "emap_ori.par", "dop.f", "makefile")
-        for filename in required_files:
-            if not (work_dir / filename).is_file():
-                raise FileNotFoundError(
-                    f"Required file '{filename}' not found in {work_dir}. "
-                    "Run 'Dopin()' first to generate 'dopin' and ensure the bundled "
-                    "Fortran sources are installed (e.g. `pydoppler.copy_fortran_code(dop.workdir)`)."
-                )
+        Every call executes the solver; builds are cached by content hashes.
+        A run succeeds only if the optimizer converges, the RMS target is met,
+        and the finite output matches the current input. ``run.json`` records
+        provenance. With supplied errors, ``covariance_mode='full'`` uses the
+        covariance propagated by :meth:`Dopin`; ``'diagonal'`` is an explicit
+        independence approximation. The fit statistic is RMS, not reduced chi².
+        """
+        from .runtime import run
 
-        if shutil.which("make") is None:
-            raise RuntimeError(
-                "The `make` executable was not found on PATH. Install make (e.g. Xcode Command Line Tools on macOS)."
-            )
-        if shutil.which("gfortran") is None:
-            raise RuntimeError(
-                "The `gfortran` executable was not found on PATH. Install gfortran and ensure it is available as `gfortran`."
-            )
-
-        compile_flag = True
-        dop_log_lines: List[str] = []
-        while compile_flag:
-            with open(work_dir / "dop.in", "w", encoding="utf-8") as f:
-                f.write(
-                    f"{self.ih}     ih       type of likelihood function (ih=1 for chi-squared)\n"
-                )
-                f.write(
-                    f"{self.iw}     iw       iw=1 if error bars are to be read and used\n"
-                )
-                f.write(
-                    f"{self.pb0}  {self.pb1}    pb0,pb1    range of phases to be ignored\n"
-                )
-                f.write(f"{self.ns}     ns       smearing width in default map\n")
-                f.write(f"{self.ac:.1e}     ac       accuracy of convergence\n")
-                f.write(f"{self.nim}     nim      max no of iterations\n")
-                f.write(
-                    f"{self.al0} {self.alf}  {self.nal}        al0,alf,nal   starting value, factor, max number of alfas\n"
-                )
-                f.write(f"{self.clim}     clim     'C-aim'\n")
-                f.write(
-                    f"{self.ipri}     ipri     printout control for standard output channel (ipr=2 for full)\n"
-                )
-                f.write(
-                    f"{self.norm}     norm     norm=1 for normalization to flat light curve\n"
-                )
-                f.write(
-                    f"{self.wid:2.1e}   {self.af}  wid,af    width and amplitude central absorption fudge\n"
-                )
-                f.write("end of parameter input file")
-
-            with open(work_dir / "dopin", encoding="utf-8") as f:
-                dopin_lines = [line.strip() for line in f if line.strip()]
-            if not dopin_lines:
-                raise RuntimeError("The 'dopin' file is empty. Run 'Dopin()' again.")
-
-            try:
-                npp, _ = int(dopin_lines[0].split()[0]), int(dopin_lines[0].split()[1])
-            except (IndexError, ValueError) as exc:
-                raise RuntimeError("Failed to parse the header line of 'dopin'.") from exc
-
-            with open(work_dir / "emap_ori.par", encoding="utf-8") as f:
-                emap_lines = f.readlines()
-            if not emap_lines:
-                raise RuntimeError("'emap_ori.par' is empty.")
-
-            s = emap_lines[0]
-            npm = int(s[s.find("npm=") + len("npm=") : s.rfind(",nvpm")])
-            nvpm = int(s[s.find("nvpm=") + len("nvpm=") : s.rfind(",nvm")])
-            nvm = int(s[s.find("nvm=") + len("nvm=") : s.rfind(")")])
-            nvp = self.vell.size
-            self._log(logging.DEBUG, f"nvp {nvp}")
-
-            self._log(logging.DEBUG, f"Trail shape {self.trsp.shape}")
-            nv0 = int(self.overs * nvp)
-            nv = max([nv0, int(min([1.5 * nv0, npp / 3.0]))])
-            self._log(logging.DEBUG, f"nv {nv} (nv0 {nv0})")
-            if nv % 2 == 1:
-                nv += 1
-
-            nd = npp * nvp
-            nr = 0.8 * nv * nv
-            nt = (nvp * npp) + (nv * nvp * 3) + (2 * npp * nv)
-            prmsize = (float(nri) + float(ndi)) * nv * nt
-
-            self._log(
-                logging.INFO,
-                f"Estimated memory required {int(8*prmsize/1e6)} Mbytes",
-            )
-            self._log(logging.DEBUG, f"np={npp}; nvpm={nvp}, nvm={nv}")
-            self._log(logging.DEBUG, f"ND {nd}")
-            self._log(logging.DEBUG, f"NR {nr}")
-
-            if nv != nvm or npp != npm or nvp != nvpm:
-                header = f"      parameter (npm={npp:4d},nvpm={nvp:4d},nvm={nv:4d})"
-                with open(work_dir / "emap.par", "w", encoding="utf-8") as f:
-                    f.write(header + "\n")
-                    for i, line in enumerate(emap_lines[1:]):
-                        if i == 2:
-                            f.write(
-                                (
-                                    "      parameter (nri={:.3f}*nvm*nt/nd,ndi={:.3f}*nvm*nt/nr)\n"
-                                ).format(nri, ndi)
-                            )
-                        else:
-                            f.write(line)
-
-            self._log(logging.INFO, '>> Computing MEM tomogram <<')
-            self._log(logging.INFO, '----------------------------')
-            try:
-                result = subprocess.run(
-                    ["make", "dop.out"],
-                    cwd=work_dir,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except subprocess.CalledProcessError as exc:
-                output = (exc.stdout or "") + (exc.stderr or "")
-                hint = ""
-                if ("dopp: No such file or directory" in output or "dopp: not found" in output) and (
-                    work_dir / "dopp"
-                ).exists():
-                    hint = (
-                        "\n\nHint: the bundled Fortran makefile must execute the local binary as `./dopp` "
-                        "(some shells do not include the current directory in PATH). "
-                        "Re-copy the Fortran assets with overwrite enabled or edit the makefile in the workdir."
-                    )
-                if (
-                    "ADRP out of range" in output
-                    or "arm64_was_adrp" in output
-                    or "fixup error" in output
-                ):
-                    hint += (
-                        "\n\nHint: On macOS/arm64, very large map dimensions can trigger linker failures. "
-                        "Try reducing `delw` (the wavelength window) and/or `overs` (map undersampling), "
-                        "then rerun `Dopin()` and `Syncdop()`. For the bundled U Gem example, "
-                        "`delw=35` and `overs=0.3` match the provided sample script."
-                    )
-                raise RuntimeError(
-                    "Failed to build/run the Fortran tomography code via `make dop.out`.\n"
-                    + output
-                    + hint
-                ) from exc
-
-            if result.stdout:
-                self._log(logging.DEBUG, result.stdout.rstrip())
-            if result.stderr:
-                self._log(logging.DEBUG, result.stderr.rstrip())
-
-            try:
-                with open(work_dir / "dop.log", encoding="utf-8") as fo:
-                    dop_log_lines = [line.strip() for line in fo if line.strip()]
-            except FileNotFoundError as exc:
-                raise FileNotFoundError(
-                    f"Expected '{work_dir / 'dop.log'}' to be produced by `make dop.out`, but it was not found."
-                ) from exc
-
-            self._log(logging.INFO, '----------------------------')
-            if not dop_log_lines:
-                raise RuntimeError("'dop.log' is empty; the Fortran code may have failed.")
-
-            last_tokens = dop_log_lines[-1].split()
-            if last_tokens and last_tokens[0] == "projection":
-                if len(dop_log_lines) < 2:
-                    raise RuntimeError("Cannot parse 'dop.log': missing summary line before 'projection'.")
-                prev_tokens = dop_log_lines[-2].split()
-                try:
-                    nri = float(last_tokens[-1]) / float(prev_tokens[-1])
-                    ndi = float(last_tokens[-2]) / float(prev_tokens[-2])
-                except (IndexError, ValueError) as exc:
-                    raise RuntimeError("Failed to parse projection matrix scaling from 'dop.log'.") from exc
-
-                self._log(logging.WARNING, '>> PROJECTION MATRIX TOO SMALL <<')
-                self._log(logging.INFO, '>> Recomputing with values from Spruit:')
-                self._log(logging.INFO, f'>> ndi = {ndi}, nri = {nri}')
-            else:
-                compile_flag = False
-
-        if len(dop_log_lines) < 2:
-            raise RuntimeError("Cannot parse convergence metrics from 'dop.log'.")
-        summary_tokens = dop_log_lines[-2].split()
-        try:
-            clim = float(summary_tokens[-1])
-            rr = float(summary_tokens[-2])
-        except (IndexError, ValueError) as exc:
-            raise RuntimeError("Failed to parse convergence metrics from 'dop.log'.") from exc
-
-        if rr > clim:
-            message = f">> NOT CONVERGED: Specified reduced chi^2 not reached: {rr} > {clim}"
-            self._log(logging.ERROR, message)
-            raise RuntimeError(message)
-
-        self._log(logging.INFO, '>> Succesful Dopmap!')
-
-
+        return run(self, nri=nri, ndi=ndi)
 
     def Dopmap(
-        self,
-        dopout: str = "dop.out",
-        cmaps=None,
-        limits=None,
-        colorbar: bool = False,
-        negative: bool = False,
-        remove_mean: bool = False,
-        corrx=0,
-        corry=0,
-        smooth: bool = False,
-        plot: Optional[bool] = None,
-        show: Optional[bool] = None,
+        self, dopout: str = "dop.out", cmaps=None, limits=None,
+        colorbar: bool = False, negative: bool = False,
+        remove_mean: bool = False, corrx=0, corry=0,
+        smooth: Union[bool, float] = False,
+        plot: Optional[bool] = None, show: Optional[bool] = None,
     ):
-        """
-        Read output files from Henk Spruit's *.out and plot a Doppler map
+        """Read a map and return ``(colorbar, displayed_array)``.
 
-        Parameters
-        ----------
-        dopout : str, Optional
-            Name of output file to be read. Default, dop.out
+        The returned array is identical to the displayed array, including
+        mean removal, smoothing and sign reversal. Pixels outside the
+        reconstruction's circular support are NaN. Without mean removal the
+        map is normalized to [0, 1]; mean-subtracted maps use absolute-maximum
+        normalization. ``smooth=True`` applies a Gaussian of sigma one pixel;
+        a positive float specifies another sigma. Smoothing precedes radial
+        mean removal and normalization. ``negative`` reverses the final sign;
+        explicit ``limits`` describe the values before that sign reversal.
 
-        cmaps : matplotlib colormap, optional
-            Color scheme to use for Doppler map
-            - Default, matplotlib.cm.Greys_r
-
-        limits : array,
-            Normalised limtis e.g. [.8,1.1] for colour display. if None,
-             automatic Limits will be generated
-            - Default, None
-
-        colorbar : bool,
-            Generates an interactive colorbar. (unstable...)
-            - Default, True
-
-        remove_mean : bool,
-            Remove an azimuthal mean of the map
-            - Default, False
-
-        corrx, corry : float, float
-            Pixel correction for center of removal of azimuthal mean map
-
-        smooth : bool,
-            Apply Gaussian filter to map.
-            - Default, False
-
-
-        Returns
-        -------
-        cbar : object,
-            Colorbar object for interactivity
-
-        data : 2D-array,
-            Data cube from Doppler map
-
+        Axes are projected velocities in km/s with the convention
+        ``v_rad - gamma = -Vx*cos(2*pi*phase) + Vy*sin(2*pi*phase)``.
+        ``corrx/corry`` shift the mean-removal center in pixel units, retaining
+        the historical convention of subtracting each correction. Raw map
+        values and physical grids are available through ``_parse_dopout``.
         """
         if plot is None:
             plot = bool(self.plot)
@@ -1526,175 +1359,101 @@ class spruit:
             show = bool(plot)
         if not plot and colorbar:
             raise ValueError("colorbar=True requires plot=True.")
-
-        plt = None
-        if plot:
-            _, plt = _lazy_import_matplotlib_pyplot()
-            if cmaps is None:
-                cmaps = plt.cm.magma
-
         dopout_path = Path(dopout)
         if not dopout_path.is_absolute():
             dopout_path = self.workdir / dopout_path
-        self._log(logging.INFO, f">> Reading {dopout_path.name} file")
-        parsed = _parse_dopout(dopout_path)
-        self._log(logging.INFO, ">> Finished reading dop.out file")
-
-        data = np.asarray(parsed.im, dtype=float)
-        if not np.any(np.isfinite(data)):
-            raise RuntimeError(f"No finite values found in {dopout_path}.")
-
-        new_data = _normalise_to_unit_interval(data)
-        data_scaled = _scale_by_absmax(data)
-
-        mean_scaled = None
+        parsed = _read_verified_dopout(dopout_path)
+        data = np.asarray(parsed.im, dtype=float).copy()
+        if not np.all(np.isfinite(data)):
+            raise RuntimeError(f"Non-finite map values found in {dopout_path}.")
+        vx, vy = np.meshgrid(parsed.vmap, parsed.vmap)
+        map_step = parsed.vmap[1] - parsed.vmap[0]
+        support = np.hypot(vx, vy) < parsed.va + map_step / 10
+        data[~support] = np.nan
+        if not np.any(support):
+            raise RuntimeError(f"The map grid has no pixels inside its circular support: {dopout_path}.")
+        sigma = float(smooth)
+        if not np.isfinite(sigma) or sigma < 0:
+            raise ValueError("smooth must be False, True, or a non-negative sigma.")
+        if sigma:
+            # Separable Gaussian with reflected edges, without a SciPy dependency.
+            radius = max(1, int(np.ceil(4 * sigma)))
+            kernel = np.exp(-0.5 * (np.arange(-radius, radius + 1) / sigma) ** 2)
+            kernel /= kernel.sum()
+            numerator = np.where(support, data, 0.0)
+            weights = support.astype(float)
+            for axis in (0, 1):
+                pads = [(0, 0), (0, 0)]
+                pads[axis] = (radius, radius)
+                def convolve(values):
+                    return np.apply_along_axis(
+                        lambda row: np.convolve(row, kernel, mode="valid"),
+                        axis, np.pad(values, pads, mode="reflect"),
+                    )
+                numerator, weights = convolve(numerator), convolve(weights)
+            data = np.full_like(numerator, np.nan)
+            np.divide(numerator, weights, out=data, where=support & (weights > 0))
         if remove_mean:
-            rad_prof = radial_profile(data, [data.shape[1] / 2 - corrx, data.shape[0] / 2 - corry])
-            meano = create_profile(
-                data,
-                rad_prof,
-                [data.shape[1] / 2 - corrx, data.shape[0] / 2 - corry],
-            )
-            mean_scaled = _scale_by_absmax(data - meano)
-
+            center = [(data.shape[1] - 1) / 2 - corrx,
+                      (data.shape[0] - 1) / 2 - corry]
+            data -= create_profile(data, radial_profile(data, center), center)
+            display = _scale_by_absmax(data)
+        else:
+            display = _normalise_to_unit_interval(data)
         if limits is None:
-            if remove_mean and mean_scaled is not None:
-                if negative:
-                    limits = _auto_display_limits(np.abs(mean_scaled), positive=True)
-                else:
-                    limits = _auto_display_limits(mean_scaled, positive=False)
-            elif negative:
-                limits = _auto_display_limits(np.abs(data_scaled), positive=True)
-            else:
-                limits = _auto_display_limits(new_data, positive=True)
+            limits = _auto_display_limits(display, positive=not remove_mean)
+        if negative:
+            display = -display
+            limits = [-limits[1], -limits[0]]
+        if not plot:
+            return None, display
 
-        self._log(
-            logging.DEBUG,
-            "Map value range %.5f..%.5f with display limits %s"
-            % (float(np.nanmin(data)), float(np.nanmax(data)), limits),
-        )
-        if not plot or plt is None:
-            return None, new_data
-
-        # Here comes the plotting
-        cmap_plot = cmaps.copy() if hasattr(cmaps, "copy") else cmaps
-        if hasattr(cmap_plot, "set_bad"):
-            cmap_plot.set_bad(color="0.85")
-
-        fig = plt.figure(num='Doppler Map',figsize=(8.57,8.57))
-        plt.clf()
+        _, plt = _lazy_import_matplotlib_pyplot()
+        if cmaps is None:
+            cmaps = plt.cm.magma
+        if hasattr(cmaps, "with_extremes"):
+            cmap_plot = cmaps.with_extremes(bad="0.85")
+        else:
+            cmap_plot = cmaps.copy() if hasattr(cmaps, "copy") else cmaps
+            if hasattr(cmap_plot, "set_bad"):
+                cmap_plot.set_bad(color="0.85")
+        fig = plt.figure(num="Doppler Map", figsize=(8.57, 8.57))
+        fig.clear()
         ax = fig.add_subplot(111)
         ax.minorticks_on()
-        delvp = parsed.vp[1] - parsed.vp[0]
-        vpmin = float(np.min(parsed.vp) - 0.5 * delvp)
-        vpmax = float(np.max(parsed.vp) + 0.5 * delvp)
-
-        if smooth:
-            interp_mode = 'gaussian'
-        else:
-            interp_mode = 'nearest'
-        if negative:
-            display = -mean_scaled if remove_mean and mean_scaled is not None else -data_scaled
-            if remove_mean:
-                img = plt.imshow(display,
-                    interpolation=interp_mode, cmap=cmap_plot,aspect='equal',
-                    origin='lower',extent=(vpmin, vpmax,vpmin, vpmax ),
-                    vmin=-limits[1],vmax=-limits[0])
-            else:
-                img = plt.imshow(display,
-                    interpolation=interp_mode, cmap=cmap_plot,aspect='equal',
-                    origin='lower',extent=(vpmin, vpmax,vpmin, vpmax),
-                    vmin=-limits[1],vmax=-limits[0] )
-        else:
-            display = mean_scaled if remove_mean and mean_scaled is not None else new_data
-            if remove_mean:
-                img = plt.imshow(display,
-                    interpolation=interp_mode, cmap=cmap_plot,aspect='equal',
-                    origin='lower',extent=(vpmin, vpmax,vpmin, vpmax),
-                    vmin=limits[0],vmax=limits[1])
-            else:
-                img = plt.imshow(display,interpolation=interp_mode,
-                    cmap=cmap_plot,aspect='equal',origin='lower',
-                    extent=(vpmin, vpmax,vpmin, vpmax ),
-                    vmin=limits[0],vmax=limits[1] )
-
-        axlimits=[float(np.min(parsed.vp)), float(np.max(parsed.vp)), float(np.min(parsed.vp)), float(np.max(parsed.vp)) ]
-        plt.axis(axlimits)
-        #plt.axvline(x=0.0,linestyle='--',color='white')
-
-        plt.xlabel('V$_x$ / km s$^{-1}$')
-        plt.ylabel('V$_y$ / km s$^{-1}$')
+        edges = _bin_edges(parsed.vmap)
+        # Fortran writes x-major. Keeping its array order here exchanges the
+        # internal axes, producing the public radial-velocity convention above.
+        img = ax.imshow(
+            display, interpolation="nearest", cmap=cmap_plot, aspect="equal",
+            origin="lower", extent=(edges[0], edges[-1], edges[0], edges[-1]),
+            vmin=limits[0], vmax=limits[1],
+        )
+        ax.set_xlabel('V$_x$ / km s$^{-1}$')
+        ax.set_ylabel('V$_y$ / km s$^{-1}$')
+        cbar = None
         if colorbar:
-            from matplotlib.colors import Normalize
-
-            norm_limits = (-limits[1], -limits[0]) if negative else (limits[0], limits[1])
-            _set_mappable_norm(
-                img,
-                Normalize(vmin=norm_limits[0], vmax=norm_limits[1]),
-            )
-            cbar = plt.colorbar(format='%.1f',orientation='vertical',
-                                fraction=0.046, pad=0.04)
-            cbar.set_label('Normalised Flux')
-            cbar = DraggableColorbar(cbar,img)
+            cbar_obj = fig.colorbar(img, ax=ax, format="%.2f", fraction=0.046, pad=0.04)
+            cbar_obj.set_label("Normalised Flux")
+            cbar = DraggableColorbar(cbar_obj, img)
             cbar.connect()
-        else:
-            cbar=None
-
-        plt.tight_layout()
+        fig.tight_layout()
         if show:
             plt.show()
-
-        '''
-        if remove_mean:
-            #print data.size/2
-            rad_prof = radial_profile(data,[data[0].size/2,data[0].size/2])
-            mean = create_profile(data,rad_prof,[data[0].size/2,data[0].size/2])
-            ll = ~np.isnan(mean)
-            fig = plt.figure('Mean')
-            plt.clf()
-            fig.add_subplot(211)
-            plt.plot(rad_prof)
-            fig.add_subplot(212)
-
-            plt.show()
-        '''
-        return cbar,new_data
-
+        return cbar, display
 
     def Reco(
-        self,
-        cmaps=None,
-        limits=None,
-        colorbar: bool = True,
-        plot: Optional[bool] = None,
-        show: Optional[bool] = None,
+        self, cmaps=None, limits=None, colorbar: bool = True,
+        plot: Optional[bool] = None, show: Optional[bool] = None,
     ):
-        """
-        Plot original and reconstructed trail spectra from Henk Spruit's *.out
+        """Return ``(data_colorbar, model_colorbar, model, data)``.
 
-        Parameters
-        ----------
-        cmaps : matplotlib colormap, optional
-            Color scheme to use for the trail spectra images.
-            - Default, matplotlib.cm.binary
-
-        limits : array,
-            Normalised limtis e.g. [.8,1.1] for colour display. if None,
-             automatic Limits will be generated
-            - Default, None
-
-        colorbar : bool,
-            Generates an interactive colorbar. (unstable...)
-            - Default, True
-
-        Returns
-        -------
-        cbar : object,
-            Colorbar object for interactivity
-
-        data : 2D-array,
-            Data cube from reconstructed spectra
-
+        Returned trails contain the input and reconstructed values restored
+        to the original flux units and velocity/phase sampling, shape
+        ``(nvp, nph)``. Only the plots are phase-binned. Both panels use
+        the same normalization (the absolute maximum of the binned data), so
+        reconstruction amplitude errors remain visible. Phases increase
+        upwards and the velocity coordinates are bin centers in km/s.
         """
         if plot is None:
             plot = bool(self.plot)
@@ -1702,127 +1461,60 @@ class spruit:
             show = bool(plot)
         if not plot and colorbar:
             raise ValueError("colorbar=True requires plot=True.")
-
-        plt = None
-        if plot:
-            _, plt = _lazy_import_matplotlib_pyplot()
-            if cmaps is None:
-                cmaps = plt.cm.binary
+        parsed = _read_verified_dopout(self.workdir / "dop.out")
+        dm, dmr = np.asarray(parsed.dm), np.asarray(parsed.dmr)
+        if not plot:
+            return None, None, dmr, dm
+        _, plt = _lazy_import_matplotlib_pyplot()
+        if cmaps is None:
+            cmaps = plt.cm.binary
+        trail_dm, phase = rebin_trail(
+            parsed.vp, dm.T, parsed.pha, self.nbins, parsed.dpha)
+        trail_dmr, _ = rebin_trail(
+            parsed.vp, dmr.T, parsed.pha, self.nbins, parsed.dpha)
+        finite_data = np.abs(trail_dm[np.isfinite(trail_dm)])
+        scale = float(finite_data.max()) if finite_data.size else 1.0
+        if scale == 0:
+            scale = 1.0
+        trails = [trail_dm / scale, trail_dmr / scale]
+        if limits is None:
+            limits = _auto_display_limits(np.concatenate([x.ravel() for x in trails]))
+        if hasattr(cmaps, "with_extremes"):
+            cmap_plot = cmaps.with_extremes(bad="0.85")
+        else:
+            cmap_plot = cmaps.copy() if hasattr(cmaps, "copy") else cmaps
+            if hasattr(cmap_plot, "set_bad"):
+                cmap_plot.set_bad(color="0.85")
+        xedges, yedges = _bin_edges(parsed.vp), _bin_edges(phase)
+        fig = plt.figure("Reconstruction", figsize=(10, 8))
+        fig.clear()
+        cbars = []
+        for index, (trail, title) in enumerate(zip(trails, ("Input", "Reconstruction"))):
+            ax = fig.add_subplot(1, 2, index + 1)
+            # pcolormesh retains exact bin edges even when output formatting
+            # has rounded spectral center coordinates slightly unevenly.
+            img = ax.pcolormesh(xedges, yedges, trail.T, shading="flat",
+                                cmap=cmap_plot, vmin=limits[0], vmax=limits[1])
+            ax.set_xlabel('Velocity / km s$^{-1}$')
+            ax.set_title(title)
+            if index == 0:
+                ax.set_ylabel("Orbital Phase")
+            else:
+                ax.tick_params(labelleft=False)
+            cbar = None
             if colorbar:
-                from matplotlib.colors import Normalize
                 from matplotlib.ticker import FormatStrFormatter
                 from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-        dopout_path = self.workdir / "dop.out"
-        parsed = _parse_dopout(dopout_path)
-        pha = parsed.pha
-        dpha = parsed.dpha
-        vp = parsed.vp
-        dm = np.asarray(parsed.dm, dtype=float)
-        dmr = np.asarray(parsed.dmr, dtype=float)
-        if not plot or plt is None:
-            return None, None, dmr, dm
-
-        trail_dm,phase = rebin_trail(vp, dm.T, pha, self.nbins, dpha,
-                                    rebin_wave=None)
-
-        trail_dmr,phase = rebin_trail(vp, dmr.T, pha, self.nbins, dpha,
-                                    rebin_wave=None)
-        trail_dm_norm = _scale_by_absmax(trail_dm)
-        trail_dmr_norm = _scale_by_absmax(trail_dmr)
-
-        x1_lim = min(vp)
-        x2_lim = max(vp)
-        if limits == None:
-            both = np.concatenate(
-                [
-                    trail_dm_norm[np.isfinite(trail_dm_norm)],
-                    trail_dmr_norm[np.isfinite(trail_dmr_norm)],
-                ]
-            )
-            limits = _auto_display_limits(both, positive=False)
-
-        # Now lets do the plotting
-        cmap_plot = cmaps.copy() if hasattr(cmaps, "copy") else cmaps
-        if hasattr(cmap_plot, "set_bad"):
-            cmap_plot.set_bad(color="0.85")
-
-        figor = plt.figure('Reconstruction',figsize=(10,8))
-        plt.clf()
-        ax1 = figor.add_subplot(121)
-        self._log(logging.DEBUG, f"Original trail value range {limits}")
-        norm_dm = None
-        if colorbar:
-            norm_dm = Normalize(vmin=limits[0], vmax=limits[1])
-        imshow_kwargs = dict(
-            interpolation='nearest',
-            cmap=cmap_plot,
-            aspect='auto',
-            origin='upper',
-            extent=(x1_lim, x2_lim, phase[0], phase[-1] + 1 / self.nbins),
-        )
-        if norm_dm is None:
-            imshow_kwargs["vmin"] = limits[0]
-            imshow_kwargs["vmax"] = limits[1]
-        else:
-            imshow_kwargs["norm"] = norm_dm
-        imgo = plt.imshow(trail_dm_norm.T, **imshow_kwargs)
-
-        ax1.set_xlabel('Velocity / km s$^{-1}$')
-        ax1.set_ylabel('Orbital Phase')
-
-        if colorbar:
-            divider1 = make_axes_locatable(ax1)
-            cax1 = divider1.append_axes("right", size="5%", pad=0.08)
-            cbar2 = figor.colorbar(
-                imgo,
-                cax=cax1,
-                orientation='vertical',
-                format=FormatStrFormatter('%.2f'),
-            )
-            cbar2.set_label('Normalised Flux')
-            cbar2 = DraggableColorbar(cbar2,imgo)
-            cbar2.connect()
-        else:
-            cbar2=1
-        ax2 = figor.add_subplot(122)
-        norm_dmr = None
-        if colorbar:
-            norm_dmr = Normalize(vmin=limits[0], vmax=limits[1])
-        imshow_kwargs = dict(
-            interpolation='nearest',
-            cmap=cmap_plot,
-            aspect='auto',
-            origin='upper',
-            extent=(x1_lim, x2_lim, phase[0], phase[-1] + 1 / self.nbins),
-        )
-        if norm_dmr is None:
-            imshow_kwargs["vmin"] = limits[0]
-            imshow_kwargs["vmax"] = limits[1]
-        else:
-            imshow_kwargs["norm"] = norm_dmr
-        imgo = plt.imshow(trail_dmr_norm.T, **imshow_kwargs)
-        ax2.set_xlabel('Velocity / km s$^{-1}$')
-        ax2.set_yticklabels([])
-        if colorbar:
-            divider2 = make_axes_locatable(ax2)
-            cax2 = divider2.append_axes("right", size="5%", pad=0.08)
-            cbar3 = figor.colorbar(
-                imgo,
-                cax=cax2,
-                orientation='vertical',
-                format=FormatStrFormatter('%.2f'),
-            )
-            cbar3.set_label('Normalised Flux')
-            cbar3 = DraggableColorbar(cbar3,imgo)
-            cbar3.connect()
-        else:
-            cbar3=1
-        plt.tight_layout(w_pad=0)
+                cax = make_axes_locatable(ax).append_axes("right", size="5%", pad=0.08)
+                cbar_obj = fig.colorbar(img, cax=cax, format=FormatStrFormatter("%.2f"))
+                cbar_obj.set_label("Flux / data peak")
+                cbar = DraggableColorbar(cbar_obj, img)
+                cbar.connect()
+            cbars.append(cbar)
+        fig.tight_layout(w_pad=0)
         if show:
             plt.show()
-        return cbar2,cbar3,dmr,dm
-
+        return cbars[0], cbars[1], dmr, dm
 
     def Residuals(
         self,
@@ -1834,135 +1526,126 @@ class spruit:
         plot: Optional[bool] = None,
         show: Optional[bool] = None,
         cmaps=None,
+        *,
+        whiten: bool = False,
+        mask_excluded: bool = True,
     ):
-        """Return residual diagnostics for the reconstruction.
+        """Return residuals and uncertainty-scaled residuals on the original phases.
 
-        Parameters
-        ----------
-        dm, dmr:
-            Data and reconstructed trail spectra as returned by :meth:`Reco`
-            (arrays shaped ``(nvp, nph)``).
-        sigma:
-            Optional uncertainty array with the same shape as ``dm``. When not
-            provided a Poisson-like estimate ``sqrt(|dm|)`` is used.
-        bins, vmax, plot, show, cmaps:
-            Deprecated plotting arguments retained for backward compatibility.
-            They are ignored because residual plotting has been removed.
-
-        Returns
-        -------
-        residuals, norm_residuals:
-            Arrays shaped like the inputs (``(nvp, nph)``).
+        Supplied ``sigma`` must be positive 1-sigma errors in the data's units.
+        Otherwise errors from the matching validated run are used. If no errors
+        are available, the second return value is ``None``: flux densities are
+        never interpreted as Poisson counts. With ``whiten=True``, require a
+        validated full-covariance fit and use its retained covariance snapshot,
+        discarding numerically null eigenmodes;
+        marginally standardized residuals otherwise remain correlated.
+        Excluded phases are NaN by default. Plot arguments are deprecated and
+        ignored; use :meth:`Reco` for the input/model comparison and plot the
+        returned residual arrays separately.
         """
+        from .runtime import _sha, covariance_modes
 
-        if dm is None or dmr is None:
+        if (dm is None) != (dmr is None):
+            raise ValueError("Pass both dm and dmr, or neither.")
+        if dm is None:
             _, _, dmr, dm = self.Reco(plot=False, colorbar=False)
-
         dm = np.asarray(dm, dtype=float)
         dmr = np.asarray(dmr, dtype=float)
-        if dm.shape != dmr.shape:
-            raise ValueError("dm and dmr must have the same shape.")
-
+        if dm.ndim != 2 or dm.shape != dmr.shape:
+            raise ValueError("dm and dmr must be matching (nvp, nph) arrays.")
+        if not np.isfinite(dm).all() or not np.isfinite(dmr).all():
+            raise ValueError("Residual inputs must be finite.")
         residuals = dm - dmr
-        if sigma is None:
-            sigma = np.sqrt(np.clip(np.abs(dm), a_min=1e-12, a_max=None))
-        sigma = np.asarray(sigma, dtype=float)
-        if sigma.shape != dm.shape:
-            raise ValueError("sigma must have the same shape as dm.")
+        matched = False
+        output_path = self.workdir / "dop.out"
+        if getattr(self, "_output_hash", None) and output_path.exists():
+            if self._output_hash == _sha(output_path):
+                parsed = _parse_dopout(output_path)
+                matched = (parsed.dm.shape == dm.shape and
+                           np.array_equal(parsed.dm, dm) and
+                           np.array_equal(parsed.dmr, dmr))
+        if whiten:
+            if sigma is not None:
+                raise ValueError("whiten=True uses full covariance; do not supply sigma.")
+            covariance = getattr(self, "_fit_covariance", None)
+            if not matched or covariance is None:
+                raise ValueError("Whitening requires a matching validated full-covariance fit.")
+            scaled = np.empty_like(residuals)
+            for index, cov in enumerate(covariance):
+                values, vectors = covariance_modes(cov, self._fit_rcond)
+                scaled[:, index] = vectors @ ((vectors.T @ residuals[:, index]) / np.sqrt(values))
+        else:
+            if sigma is None and matched:
+                sigma = getattr(self, "_fit_sigma", None)
+            if sigma is None:
+                scaled = None
+            else:
+                sigma = np.asarray(sigma, dtype=float)
+                if sigma.shape != dm.shape or not np.isfinite(sigma).all() or np.any(sigma <= 0):
+                    raise ValueError("sigma must be positive, finite and have the data shape.")
+                scaled = residuals / sigma
+        if mask_excluded and matched:
+            valid = np.asarray(self._fit_phase_mask, dtype=bool)
+            residuals[:, ~valid] = np.nan
+            if scaled is not None:
+                scaled[:, ~valid] = np.nan
+        return residuals, scaled
 
-        with np.errstate(divide="ignore", invalid="ignore"):
-            norm_residuals = residuals / sigma
-
-        return residuals, norm_residuals
 
 def rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):
-    """
-    Re-bin a set of spectra (flux[i] sampled at waver) onto an orbital-phase grid.
+    """Exposure-overlap-weighted diagnostic trail on periodic phase bins.
 
-    Parameters
-    ----------
-    waver : 1D array
-        Common wavelength/velocity sampling for each flux[i].
-    flux : 2D array, shape (nspec, nwave)
-        Spectra to rebin in phase.
-    input_phase : 1D array, shape (nspec,)
-        Orbital phase (0..1) for each spectrum in `flux`.
-    nbins : int
-        Number of phase bins in [0,1).
-    delp : float or 1D array
-        Effective phase width per spectrum for bin-weighting (typically ~1/nbins).
-        When an array is provided it must match ``input_phase``.
-    rebin_wave : None
-        (Kept for API compatibility; not used because `flux` is already on `waver`.)
-
-    Returns
-    -------
-    trail : 2D array, shape (nwave, 2*nbins+2)
-        Phase-binned trail spectrum covering ~[0,2] for plotting two orbits.
-    phase : 1D array, shape (2*nbins+2,)
-        Phase coordinate for `trail` columns.
+    ``flux`` is (nspec, nwave); ``input_phase`` gives exposure centers in
+    cycles and ``delp`` their positive widths (scalar or per spectrum).
+    The return values are (nwave, 2*nbins+2) and the corresponding bin
+    centers. The first and last columns pad two full orbits. Empty bins are
+    NaN. Each finite spectral pixel is weighted by its exposure's exact
+    overlap with a bin; missing pixels do not contaminate other exposures.
+    This is a diagnostic average, not an inverse-variance statistical binning.
+    ``rebin_wave`` must be None or zero; wavelength rebinning is not supported.
     """
+    if rebin_wave is not None and rebin_wave != 0:
+        raise ValueError("rebin_wave is unsupported; use the native spectral sampling.")
     waver = np.asarray(waver, dtype=float)
-    input_phase = np.asarray(input_phase, dtype=float)
     flux = np.asarray(flux, dtype=float)
-    if waver.ndim != 1 or waver.size == 0:
-        raise ValueError("waver must be a non-empty 1D array.")
-    if flux.ndim != 2:
-        raise ValueError("flux must be a 2D array with shape (nspec, nwave).")
-    if flux.shape[0] != input_phase.size:
-        raise ValueError("flux and input_phase must contain the same number of spectra.")
-    if flux.shape[1] != waver.size:
-        raise ValueError("flux.shape[1] must match waver.size.")
-    nbins = int(nbins)
-    if nbins <= 0:
+    input_phase = np.asarray(input_phase, dtype=float)
+    if waver.ndim != 1 or not waver.size or not np.all(np.isfinite(waver)):
+        raise ValueError("waver must be a non-empty finite 1D array.")
+    if input_phase.ndim != 1 or not np.all(np.isfinite(input_phase)):
+        raise ValueError("input_phase must be a finite 1D array.")
+    if flux.ndim != 2 or flux.shape != (input_phase.size, waver.size):
+        raise ValueError("flux must have shape (nspec, nwave).")
+    if isinstance(nbins, (bool, np.bool_)) or int(nbins) != nbins or nbins <= 0:
         raise ValueError("nbins must be a positive integer.")
-
-    # Two orbits + half-bin shift, like upstream.
-    phase = np.linspace(0, 2, nbins * 2 + 1, endpoint=True) - 1.0 / nbins / 2.0
-    phase = np.concatenate((phase, [2.0 + 1.0 / nbins / 2.0]))
-    phase_dec = phase - np.floor(phase)
-
-    trail = np.zeros((waver.size, phase.size), dtype=float)
-    tots = np.zeros(phase.size, dtype=float)
-
-    inv_bin = 1.0 / nbins
-    delp_vals = np.asarray(delp, dtype=float)
-    if delp_vals.ndim == 0:
-        delp_vals = np.full(input_phase.shape, float(delp_vals))
-    elif delp_vals.shape != input_phase.shape:
-        raise ValueError("delp must be a scalar or have shape (nspec,).")
-
-    bad = (~np.isfinite(delp_vals)) | (delp_vals <= 0)
-    if np.any(bad):
-        fill = float(np.nanmedian(delp_vals[~bad])) if np.any(~bad) else inv_bin
-        delp_vals = delp_vals.copy()
-        delp_vals[bad] = fill
-
-    for i in range(input_phase.size):
-        # Build trapezoidal weights for interval [phi - half, phi + half] in
-        # circular phase space to preserve contributions across phase wrap.
-        phi = float(input_phase[i] - np.floor(input_phase[i]))
-        half = float(delp_vals[i]) / 2.0
-        wts = np.zeros_like(phase_dec)
-
-        d = _phase_signed_delta(phase_dec, phi + half)
-        d[np.abs(d) > inv_bin] = 0.0
-        d[d > 0] = 0.0
-        wts += np.abs(d) / inv_bin
-
-        d = _phase_signed_delta(phase_dec, phi - half)
-        d[np.abs(d) > inv_bin] = 0.0
-        d[d > 0] = 0.0
-        mask = np.abs(d) > 0
-        wts[mask] += 1.0 - (np.abs(d[mask]) / inv_bin)
-
-        trail += np.outer(flux[i], wts)
-        tots += wts
-
-    tots_safe = tots.astype(float)
-    tots_safe[tots_safe == 0.0] = np.nan
-    trail = trail / tots_safe
-    return trail, phase
+    nbins = int(nbins)
+    widths = np.asarray(delp, dtype=float)
+    if widths.ndim == 0:
+        widths = np.full(input_phase.shape, float(widths))
+    if widths.shape != input_phase.shape or not np.all(np.isfinite(widths)) or np.any(widths <= 0):
+        raise ValueError("delp must contain finite positive exposure widths, one per spectrum.")
+    lo = np.arange(nbins, dtype=float) / nbins
+    hi = lo + 1.0 / nbins
+    weights = np.empty((input_phase.size, nbins), dtype=float)
+    for i, (phi, width) in enumerate(zip(input_phase, widths)):
+        # Each complete orbit contributes one full bin. Treat the remaining
+        # interval in [0,2), including an interval crossing phase zero.
+        full_orbits = np.floor(width)
+        remainder = width - full_orbits
+        start = (phi - width / 2.0) % 1.0
+        stop = start + remainder
+        overlap = np.maximum(0, np.minimum(hi, stop) - np.maximum(lo, start))
+        overlap += np.maximum(0, np.minimum(hi + 1, stop) - np.maximum(lo + 1, start))
+        # Roundoff at exactly touching edges must not create a full-valued
+        # ghost bin after dividing a tiny numerator by the same tiny weight.
+        overlap[overlap <= 8 * np.finfo(float).eps] = 0.0
+        weights[i] = full_orbits / nbins + overlap
+    valid = np.isfinite(flux)
+    numerator = np.where(valid, flux, 0.0).T @ weights
+    denominator = valid.astype(float).T @ weights
+    trail = np.full_like(numerator, np.nan)
+    np.divide(numerator, denominator, out=trail, where=denominator > 0)
+    indices = np.arange(-1, 2 * nbins + 1)
+    return trail[:, indices % nbins], (indices + 0.5) / nbins
 
 
 class DraggableColorbar(object):
@@ -2001,7 +1684,8 @@ class DraggableColorbar(object):
 
     def on_press(self, event):
         """on button press we will see if the mouse is over us and store some data"""
-        if event.inaxes != self.cbar.ax: return
+        if event.inaxes != self.cbar.ax:
+            return
         self.press = event.x, event.y
 
     def key_press(self, event):
@@ -2022,10 +1706,11 @@ class DraggableColorbar(object):
 
     def on_motion(self, event):
         'on motion we will move the rect if the mouse is over us'
-        if self.press is None: return
-        if event.inaxes != self.cbar.ax: return
+        if self.press is None:
+            return
+        if event.inaxes != self.cbar.ax:
+            return
         xprev, yprev = self.press
-        dx = event.x - xprev
         dy = event.y - yprev
         self.press = event.x,event.y
         #print 'x0=%f, xpress=%f, event.xdata=%f, dx=%f, x0+dx=%f'%(x0, xpress, event.xdata, dx, x0+dx)
@@ -2056,236 +1741,186 @@ class DraggableColorbar(object):
 
 
 def radial_profile(data, center):
-    """Calculate radial profile for Dopple map"""
-    y, x = np.indices((data.shape))
-    r = np.sqrt((x - center[0])**2 + (y - center[1])**2)
-    r = r.astype(int)
+    """Mean of finite pixels in integer-radius annuli about a pixel center."""
+    data = np.asarray(data, dtype=float)
+    y, x = np.indices(data.shape)
+    r = np.hypot(x - center[0], y - center[1]).astype(int)
+    valid = np.isfinite(data)
+    sums = np.bincount(r[valid], weights=data[valid], minlength=r.max() + 1)
+    counts = np.bincount(r[valid], minlength=r.max() + 1)
+    result = np.full(sums.shape, np.nan)
+    np.divide(sums, counts, out=result, where=counts > 0)
+    return result
 
-    tbin = np.bincount(r.ravel(), data.ravel())
-    nr = np.bincount(r.ravel())
-    radialprofile = tbin / nr
-    return radialprofile
 
-def create_profile(data,profile, center):
-    y, x = np.indices((data.shape))
-    r = np.sqrt((x - center[0])**2 + (y - center[1])**2)
-    r = r.astype(int)
-    mean = data*0.0 + 1.0
-    for i in np.arange(r.max()):
-    	#print i
-    	ss = np.where(r == i)
-    	#print profile[i]
-    	mean[ss] = mean[ss] * profile[i]
-    ll = ~np.isnan(mean)
-    #print mean[ll]
-    return mean
+def create_profile(data, profile, center):
+    """Expand an annular profile to every pixel, including the outer annulus."""
+    y, x = np.indices(np.shape(data))
+    r = np.hypot(x - center[0], y - center[1]).astype(int)
+    return np.asarray(profile)[r]
 
-def stream(q,k1,porb,m1,inc,colors='k',both_lobes=False,title=True,label=None):
-    """Calculate the Ballistic and Keplerian trajetories for a given binary
-    system under Roche lobe geometry. This will be plotted directly in the
-    Doppler tomogram
+
+def stream(q, k1, porb, m1, inc, colors='k', both_lobes=False, title=True, label=None):
+    """Overlay projected ballistic/Keplerian velocities and Roche outlines.
+
+    ``q=M2/M1``, ``k1`` is the observed primary semi-amplitude in km/s,
+    ``porb`` is in days, ``m1`` in solar masses and ``inc`` in degrees.
+    K1 sets the velocity scale; the redundant mass/period/inclination values
+    are checked and a warning reports discrepancies greater than 2 percent.
+    Pass ``k1=None`` to derive the scale from those three quantities instead.
     """
-    _, plt = _lazy_import_matplotlib_pyplot()
-    xl,yl,xi,yi,wout,wkout = stream_calculate(q,ni = 100,nj = 100)
-
-    #print''
-    azms=-70
-    az=np.arctan(yi/xi)
-
-    for i in np.arange(len(az)):
-        if xi[i] < 0.0:
-            az[i]=az[i] + np.pi
-            #print az[i],az[i]*180/np.pi
-    az=az*180/np.pi
-    i=0
-    for j in np.arange(az.size):
-        #print az[j]
-        i=i+1
-        if az[j] < azms:
-            break
-
-    vxi = np.real(wout)
-    vyi = np.imag(wout)
-    vkxi = np.real(wkout)
-    vkyi = np.imag(wkout)
-    #print az[0],i
-    porb=24*3600*porb           # in seconds
-    omega=2*np.pi/porb
-    gg=6.667e-8                     # Gravitational Constant, cgs
-    msun=1.989e33
-    cm=q/(1.0+q)
-    nvp=1000
-    vxp,vyp,vkxp,vkyp,rr=[],[],[],[],[]
-
-    xl=xl-cm
-    inc=np.pi*inc/180.0
-    a=(gg*m1*msun*(1.0+q))**(1./3)/omega**(2./3)     # Orbital Separation
-    vfs=1e5
-    vs=omega*a/vfs
-    rd=0
-    r=1
-    vxi=vxi[:i]
-    vyi=vyi[:i]
-    vkxi=vkxi[:i]
-    vkyi=vkyi[:i]
-    az=az[:i]
-    si=np.sin(inc)
-    vx=vxi*si*vs
-    vy=vyi*si*vs
-    vkx=vkxi*si*vs
-    vky=vkyi*si*vs
-    xl=xl*vs*si
-    yl=yl*vs*si
-    npl=len(az)
-    #fig = plt.figure(num='Doppler Map')
-    #ax = fig.add_subplot(111)
-    #dist = np.sqrt((vx - vkx)**2 + (vy - vky)**2)
-    #dist = np.abs(vy-vky)
-    #print np.abs(vy-vky)[:12],dist[:12]
-    #ss = np.where( dist == min(dist) )[0]
-    #print vy[-1],vky[-1],vx[-1],vx[-1]
-    #print vx[ss],vy[ss]
-    plt.plot(vx[:],vy[:],color=colors,marker='')
-    plt.plot(vkx[:],vky[:],color=colors,marker='')
-    plt.plot(yl[int(yl.size/4):3*int(yl.size/4)],xl[int(xl.size/4):3*int(xl.size/4)],color=colors)
-    if title: plt.title(r'$i$='+str(inc/np.pi*180.)[:5]+', M$_1$='+str(m1)+r' M$_{\odot}$, $q$='+str(q)+', P$_{orb}$='+str(porb/3600.)[:4]+' hr')
-    ## 0,0 systemic velocity, km/s
-    vy1 = cm * vs * si
-    plt.plot(0.,0.,'x',ms = 9,c = colors,alpha=0.3)
-    ## 0,-K1 systemic velocity, km/s
-    plt.plot(0.,-vy1,'+',ms = 10,c = colors,alpha=0.7)
-    plt.plot(0.,(1.0-cm)*vs*si,'+',ms = 10,c = colors,alpha=0.7)
-
-    if both_lobes:
-        plt.plot(np.concatenate((yl[3*int(xl.size/4):],yl[:int(yl.size/4)]),axis=0),
-        np.concatenate((xl[3*int(xl.size/4):],xl[:int(yl.size/4)]),axis=0),color=colors,ls='--')
-        #plt.plot(yl,xl,color=colors)
+    import warnings
+    q = _positive_scalar(q, "q")
+    porb = _positive_scalar(porb, "porb")
+    m1 = _positive_scalar(m1, "m1")
+    inc = float(inc)
+    if not np.isfinite(inc) or not 0 <= inc <= 90:
+        raise ValueError("inc must be finite and between 0 and 90 degrees.")
+    omega = 2 * np.pi / (porb * 86400)
+    scale_from_mass = (6.67430e-8 * 1.98847e33 * m1 * (1 + q) * omega) ** (1 / 3)
+    scale_from_mass *= np.sin(np.deg2rad(inc)) / 1e5
+    expected_k1 = q / (1 + q) * scale_from_mass
+    if k1 is None:
+        scale = scale_from_mass
     else:
-        plt.plot(yl[int(yl.size/4):3*int(yl.size/4)],xl[int(xl.size/4):3*int(xl.size/4)],color=colors)
-
+        k1 = _positive_scalar(k1, "k1")
+        if inc == 0:
+            raise ValueError("A face-on binary cannot have a positive projected K1.")
+        if not np.isclose(k1, expected_k1, rtol=0.02, atol=0):
+            warnings.warn(
+                f"K1={k1:g} km/s differs from the M1/P/q/i prediction "
+                f"({expected_k1:.6g} km/s); the overlay uses the supplied K1.",
+                RuntimeWarning, stacklevel=2,
+            )
+        scale = k1 * (1 + q) / q
+    xl, yl, _, _, ballistic, keplerian = stream_calculate(q)
+    cm = q / (1 + q)
+    _, plt = _lazy_import_matplotlib_pyplot()
+    plt.figure(num="Doppler Map")
+    plt.plot(ballistic.real * scale, ballistic.imag * scale, color=colors)
+    plt.plot(keplerian.real * scale, keplerian.imag * scale, color=colors)
+    quarter = xl.size // 4
+    donor = slice(quarter, 3 * quarter)
+    plt.plot(yl[donor] * scale, (xl[donor] - cm) * scale, color=colors)
+    if both_lobes:
+        ix = np.r_[np.arange(3 * quarter, xl.size), np.arange(quarter)]
+        plt.plot(yl[ix] * scale, (xl[ix] - cm) * scale, color=colors, ls="--")
+    plt.plot(0, 0, "x", ms=9, c=colors, alpha=0.3)
+    plt.plot(0, -cm * scale, "+", ms=10, c=colors, alpha=0.7)
+    plt.plot(0, (1 - cm) * scale, "+", ms=10, c=colors, alpha=0.7)
+    if title:
+        plt.title(rf"$i$={inc:g}, $M_1$={m1:g} $M_\odot$, $q$={q:g}, $P_{{orb}}$={porb * 24:.3g} hr")
     if label is not None:
-        ax = plt.gca()
-        plt.text(0.12, 0.1, label, ha="center", va="center", transform=ax.transAxes)
+        plt.text(0.12, 0.1, label, ha="center", va="center", transform=plt.gca().transAxes)
     plt.tight_layout()
 
-def stream_calculate(qm,ni = 100,nj = 100):
-    '''
-    calculates Roche lobes and integrates path of stream from L1
-    '''
-    nmax = 10000
-    xout = np.zeros(nmax)
-    yout = np.zeros(nmax)
-    rout = np.zeros(nmax)
-    wout = np.zeros(nmax,dtype=complex)
-    wkout = np.zeros(nmax,dtype=complex)
-    if np.abs(qm - 1.0) <= 1e-4:
-        # Nudge away from exact unity to avoid convergence issues without
-        # collapsing to an extreme mass ratio.
-        qm = 1.0 - 1e-3 if qm <= 1.0 else 1.0 + 1e-3
-    rd = 0.1
-    if qm <= 0.0:
-        raise ValueError("Mass ratio q must be > 0.")
+
+def _positive_scalar(value, name):
+    value = float(value)
+    if not np.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be > 0 and finite.")
+    return value
+
+
+def stream_calculate(qm, ni=100, nj=100, *, rtol=1e-8, atol=1e-10, max_angle=70.0):
+    """Roche outlines and a cold ballistic stream launched just inside L1.
+
+    Lengths use separation a=1; velocities use Omega*a=1. Return values are
+    ``(lobe_x, lobe_y, stream_x, stream_y, ballistic_v, keplerian_v)``.
+    Stream positions retain the historical primary-centered convention with
+    ``stream_y=-physical_y``; complex velocities use physical (+x,+y), in the
+    inertial frame expressed on the instantaneous binary axes. The stream
+    starts at L1-0.001a at rest in the rotating frame and ends at max_angle
+    degrees about the primary. This is a test-particle trajectory, not a gas
+    hydrodynamics model. Adaptive RK4 step doubling controls local error.
+    Returned trajectory arrays contain only accepted samples (no zero pad).
+    ``nj`` remains accepted for compatibility; only the orbital-plane outline
+    is needed, so a full latitude/longitude surface is not computed.
+    """
+    qm = _positive_scalar(qm, "Mass ratio q")
+    rtol = _positive_scalar(rtol, "rtol")
+    atol = _positive_scalar(atol, "atol")
+    if int(ni) != ni or ni < 3 or int(nj) != nj or nj < 1:
+        raise ValueError("ni must be an integer >= 3 and nj an integer >= 1.")
+    max_angle = float(max_angle)
+    if not np.isfinite(max_angle) or not 0 < max_angle < 180:
+        raise ValueError("max_angle must lie between 0 and 180 degrees.")
     rl1 = rlq1(qm)
+    x, y = lobes(qm, rl1, int(ni), 1)
+    cm = qm / (1 + qm)
+    z1, z2 = -cm, 1 - cm
+    z, w = complex(rl1 - cm - 1e-3), 0j
+    dt, elapsed = 1e-4, 0.0
+    target = np.deg2rad(max_angle)
+    positions, velocities = [z], [w]
 
-    x,y = lobes(qm,rl1,ni,nj)
-    ## Center of mass relative to M1
-    cm = qm / (1.0 + qm)
-    ## Coordinates of M1 and M2
-    z1=-cm
-    z2=1-cm
-    wm1=np.conj(complex(0.,-cm))
-    ## Start at L1-eps with v=0
-    eps=1e-3
-    z = complex(rl1 - cm -eps,0.)
-    w = 0
-    zp,wp = eqmot(z,w,z1,z2,qm)
-    t=0
-    dt=1e-4
-    isa=0
-    it=0
-    r=1
-    ist=0
-    ph=0.
-    phmax=6
-    while it < nmax and ph < phmax:
-        dz,dw = intrk(z,w,dt,z1,z2,qm)
-        z=z+dz
-        w=w+dw
-        t=t+dt
-        if np.abs(dz)/np.abs(z) > 0.02: dt=dt/2.
-        if np.abs(dz)/np.abs(z) < 0.005: dt=2.*dt
+    def step(z, w, dt):
+        dz, dw = intrk(z, w, dt, z1, z2, qm)
+        return z + dz, w + dw
 
-        dph= -np.imag(z*np.conj(z-dz))/np.abs(z)/np.abs(z-dz)
-        ph=ph+dph
-        ##velocity in inertial frame
-        ##change by Guillaume
-        wi=w+complex(0,1.)*z
-        ## unit vector normal to kepler orbit
-        rold=r
-        r=np.abs(z-z1)
+    for _ in range(100000):
+        coarse_z, coarse_w = step(z, w, dt)
+        half_z, half_w = step(z, w, dt / 2)
+        fine_z, fine_w = step(half_z, half_w, dt / 2)
+        err_z, err_w = (fine_z - coarse_z) / 15, (fine_w - coarse_w) / 15
+        error = max(abs(err_z) / (atol + rtol * max(abs(z), abs(fine_z))),
+                    abs(err_w) / (atol + rtol * max(abs(w), abs(fine_w))))
+        if not np.isfinite(error):
+            raise RuntimeError("Non-finite ballistic stream integration step.")
+        if error <= 1:
+            next_z, next_w = fine_z + err_z, fine_w + err_w
+            if np.angle(next_z - z1) >= target:
+                # Locate the final angular event, so changing tolerances does
+                # not change the requested endpoint of the plotted stream.
+                lo, hi = 0.0, dt
+                for _ in range(40):
+                    mid = (lo + hi) / 2
+                    zm, wm = step(z, w, mid / 2)
+                    zm, wm = step(zm, wm, mid / 2)
+                    if np.angle(zm - z1) < target:
+                        lo = mid
+                    else:
+                        hi = mid
+                z, w = zm, wm
+                positions.append(z)
+                velocities.append(w)
+                break
+            z, w = next_z, next_w
+            positions.append(z)
+            velocities.append(w)
+            elapsed += dt
+            if elapsed > 100:
+                raise RuntimeError("Ballistic stream did not reach the requested angle.")
+        dt *= min(2.0, max(0.2, 0.9 * error ** (-0.2))) if error > 0 else 2.0
+        dt = min(dt, 0.05)
+        if dt < 1e-12:
+            raise RuntimeError("Ballistic stream integration requires a singular step.")
+    else:
+        raise RuntimeError("Ballistic stream exceeded its integration step limit.")
+    z = np.asarray(positions)
+    w = np.asarray(velocities)
+    r = np.abs(z - z1)
+    inertial = w + 1j * z
+    keplerian = 1j * (z - z1) / r / np.sqrt(r * (1 + qm)) - 1j * cm
+    return x, y, z.real + cm, -z.imag, inertial, keplerian
 
-        if ist == 0 and rold < r:
-            ist=1
-            rmin=rold
-
-        # kepler velocity of circular orbit in potential of M1, rel. to M1
-        vk=1.0/np.sqrt(r*(1.0+qm))
-        # unit vector in r
-        no = np.conj(z-z1)/r
-        wk = -vk*no*complex(0.,1.)
-        # same but rel. to cm, this is velocity in inertial frame
-        wk = wk+wm1
-        # velocity normal to disk edge, in rotating frame
-        dot = no * w
-        # velocity parallel to disk edge
-        par = np.imag(no*w)
-        # reflected velocity
-        wr = w - 2.0*dot*no
-        #        write(*,'(f8.4,1p9e11.3)')t,z,w,wk,wr,r
-        xout[it] = np.real(z)+cm
-        yout[it] = -np.imag(z)
-        rout[it] = np.sqrt(xout[it]**2+yout[it]**2)
-        # change by Guillaume
-        wout[it]= wi
-        wkout[it]=np.conj(wk)
-        if it > 0:
-            xo=xout[it]
-            yo=yout[it]
-            phi=np.arctan(yo/xo)
-            if rout[it] < rd and rout[it-1] >  rd:
-            ## write(*,'('' r,x,y,phi,vs,vk,dot,par'',8f8.3)')
-            ##    rout(it),x,y,phi,real(w),vk,dot,par
-            ## write(*,'('' w,no'',4f8.3)')w,no
-                xo=xout[it-1]
-                yo=yout[it-1]
-                phi=np.arctan(yo/xo)
-            # write(*,'('' r,x,y,phi'',4f8.3)')rout(it-1),x,y,phi
-
-        if isa == 0 and yout[it] < 0:
-            isa=1
-            ra=np.abs(z-z1)
-            wc=np.conj(w)+complex(0.,1.)*np.conj(z-z1)
-            ang=np.abs(np.imag((z-z1)*np.conj(wc)))
-        it+=1
-    return x,y,xout,yout,wout,wkout
 
 def rlq1(q):
-    '''
-    Calulates roche lobe radius.
-    '''
-    if np.abs(1.0 - q) < 1e-4:
-        rlq = 0.5
-        return rlq
-    rl = 0
-    rn = 1.0 - q
-    while np.abs(rl/rn-1.) > 1e-4:
-        rl=rn
-        f=q/(1.-rl)**2-1./rl**2+(1.+q)*rl-q
-        fa=2.*q/(1-rl)**3+2/rl**3+(1.+q)
-        rn=rl-f/fa
-    rlq1 = rn
-    return rlq1
-
+    """Primary-to-L1 distance in units of a (not a volume-equivalent radius)."""
+    q = _positive_scalar(q, "q")
+    if q == 1:
+        return 0.5
+    # The L1 equation is strictly increasing between the stellar centers.
+    # Bracketing avoids Newton guesses outside this physical interval.
+    lo, hi = 0.0, 1.0
+    for _ in range(60):
+        r = (lo + hi) / 2
+        f = q / (1 - r) ** 2 - 1 / r ** 2 + (1 + q) * r - q
+        if f < 0:
+            lo = r
+        else:
+            hi = r
+    return (lo + hi) / 2
 
 
 def lobes(q,rs,ni,nj):
@@ -2296,9 +1931,9 @@ def lobes(q,rs,ni,nj):
     ch = np.zeros(ni)
     ps = np.zeros(nj)
     x  = np.zeros(ni)
-    y  = np.zeros(nj)
+    y  = np.zeros(ni)
     x2 = np.zeros(ni)
-    y2 = np.zeros(nj)
+    y2 = np.zeros(ni)
     nc = ni
     nop = nj
 
@@ -2343,58 +1978,40 @@ def pot(q,x,y,z):
     return pot,pr
 
 
-def surface(q,rs,nc,nop,r,ch,ps):
-    '''
-    SUBROUTINE
-    Roche surface around M2, coordinates on surface are ch, ps.
-    ch: polar angle from direction to M1; ps: corresponding azimuth, counting
-    from orbital plane.
-    q:mass ratio, rs: radius of surface at point facing M1
-    nc, np: number of chi's, psi's.
-    output:
-    r(nf,nt): radius. ch, ps: chi and psi arrays
-    '''
-    r = np.zeros((nc,nop))
-    dc = np.pi/nc
-    ch[0] = 0
-    for i in np.arange(nc-1)+1:
-        ch[i] = float(i)*np.pi/(nc-1.)
-    ps[0] = 0
-    for j in np.arange(nop-1)+1:
-        ps[j] = float(j)*2.*np.pi/nop
-    rs1 = 1.0 -rs
-    fs,pr = pot(q,rs1,0.0,0.0)
+def surface(q, rs, nc, nop, r, ch, ps):
+    """Critical Roche surface around M2; rs is primary-to-L1 distance.
 
-    ## max no of iterations
-    im = 20
-
-    for i in np.arange(nop):
-        cp = np.cos(ps[i])
-        sp = np.sin(ps[i])
-        rx = (1.0 - dc) * rs1
-        r[0,i] = rs1
-
-        for k in np.arange(nc-1)+1:
-            x  = np.cos(ch[k])
-            sc = np.sin(ch[k])
-            y  = sc * cp
-            z  = sc * sp
-            j  = 0
-            f  = 1
-            while (j < im ) and np.abs(f - fs) > 1e-4 or j == 0:
-                j = j+1
-                r1 = rx
-                f,pr = pot(q,r1*x,r1*y,r1*z)
-                rx = r1 - (f - fs)/pr
-                if rx > rs1: rx = rs1
-            if j >= im:
-                raise RuntimeError(
-                    f"No convergence in surface() at k={k}, i={i}, ch={ch[k]}, ps={ps[i]}"
-                )
-
-            r[k,i] = rx
-
-    return r,ch,ps
+    Chi is measured from the direction towards M1 and psi from the orbital
+    plane. Bracketed radial solves preserve the critical equipotential,
+    including the equal-mass limit, without perturbing the mass ratio.
+    """
+    q = _positive_scalar(q, "q")
+    if int(nc) != nc or nc < 3 or int(nop) != nop or nop < 1:
+        raise ValueError("nc must be >= 3 and nop >= 1.")
+    if not np.isfinite(rs) or not 0 < rs < 1:
+        raise ValueError("rs must be between the two stellar centers.")
+    ch = np.linspace(0, np.pi, int(nc))
+    ps = np.arange(int(nop)) * (2 * np.pi / nop)
+    direction_x = np.cos(ch)[:, None]
+    direction_y = np.sin(ch)[:, None] * np.cos(ps)[None, :]
+    rs1 = 1 - rs
+    target, _ = pot(q, rs1, 0.0, 0.0)
+    lo = np.zeros((int(nc), int(nop)))
+    hi = np.full_like(lo, rs1)
+    cm_from_m2 = 1 / (1 + q)
+    for _ in range(60):
+        radius = (lo + hi) / 2
+        distance_m1 = np.sqrt(1 + radius ** 2 - 2 * radius * direction_x)
+        potential = (-1 / radius - 1 / (q * distance_m1)
+                     - 0.5 * (1 + 1 / q) * (cm_from_m2 ** 2
+                       + radius ** 2 * (direction_x ** 2 + direction_y ** 2)
+                       - 2 * cm_from_m2 * radius * direction_x))
+        inside = potential < target
+        lo = np.where(inside, radius, lo)
+        hi = np.where(inside, hi, radius)
+    r = (lo + hi) / 2
+    r[0, :] = rs1
+    return r, ch, ps
 
 
 def eqmot(z,w,z1,z2,qm):
@@ -2434,36 +2051,33 @@ def intrk(z,w,dt,z1,z2,qm):
 def xy(r,phi):
   return r*np.cos(phi), r*np.sin(phi)
 
-def resonance(j,k,k1,q,porb,m1):
-    '''Plots iso-velocity for resonance, in the general
-    notation of Whitehurst & King (19XX). Eq. taken from Warner 1995
-    page 206-207.
-    '''
+def resonance(j, k, k1, q, porb=None, m1=None):
+    """Plot projected j:(j-k) resonance and tidal-truncation velocity circles.
+
+    q=M2/M1; K1 is the observed primary semi-amplitude in km/s. The dashed
+    resonance radius is r/a=[(j-k)/j]**(2/3)/(1+q)**(1/3). The solid circle
+    uses the approximate tidal radius 0.60*a/(1+q), not the circularization
+    radius. Since K1 already includes inclination, no further projection is
+    needed. Historical porb/m1 arguments are redundant and accepted only for
+    compatibility; positive values are validated when supplied.
+    """
+    q = _positive_scalar(q, "q")
+    k1 = _positive_scalar(k1, "k1")
+    if int(j) != j or int(k) != k or not 0 < k < j:
+        raise ValueError("Resonance indices must be integers with 0 < k < j.")
+    if porb is not None:
+        _positive_scalar(porb, "porb")
+    if m1 is not None:
+        _positive_scalar(m1, "m1")
+    resonance_radius = ((j - k) / j) ** (2 / 3) / (1 + q) ** (1 / 3)
+    tidal_radius = 0.60 / (1 + q)
     _, plt = _lazy_import_matplotlib_pyplot()
-    k1 *= 1e5
-    porb *= 24. * 3600.
-    a_1 = k1 / q / (2.0*np.pi) * porb
-    a_2 = k1 / (2.0*np.pi) * porb
-    a = a_1 + a_2
-
-    r = (j-k)**(2./3.) / j**(2./3.) / (1.0 + q)**(1./3.) * a
-    r_circ = a * 0.60/(1. + q)
-    velo = np.sqrt(6.67e-08 * m1 *1.989e+33 / r)/1e5
-    velo_circ = np.sqrt(6.67e-08 * m1 *1.989e+33 / r_circ)/1e5
-    phis=np.arange(0,6.28,0.01)
-
-    #print r/69950000000.0,velo
-    fig = plt.figure(num='Doppler Map')
-    xx,yy = xy(velo,phis)
-    plt.plot( xx,yy-k1/1e5,c='k',ls=':')
-    #ax = fig.add_subplot(111)
-    #circ = plt.Circle((0-k1,0),velo,ls='--',color='k',fill=True)
-
-
-    #print velo_circ,velo
-    xx_circ,yy_circ = xy(velo_circ,phis)
-    plt.plot( xx_circ,yy_circ-k1/1e5,c='k',ls='-',lw=2)
-
+    plt.figure(num="Doppler Map")
+    phis = np.linspace(0, 2 * np.pi, 629)
+    for radius, style in ((resonance_radius, ":"), (tidal_radius, "-")):
+        velocity = k1 * np.sqrt((1 + q) / radius) / q
+        xx, yy = xy(velocity, phis)
+        plt.plot(xx, yy - k1, c="k", ls=style)
     plt.draw()
 
 

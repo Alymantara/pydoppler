@@ -1,12 +1,12 @@
-0     ih       type of likelihood function (ih=1 for chi-squared)
-0     iw       iw=1 if error bars are to be read and used
-0.95  1.05    pb0,pb1    range of phases to be ignored
-7     ns       smearing width in default map
-8e-4     ac       accuracy of convergence
-150     nim      max no of iterations
-0.002 1.7  0        al0,alf,nal   starting value, factor, max number of alfas
-1.6     clim     'C-aim'
-2     ipri     printout control for standard output channel (ipr=2 for full)
-1     norm     norm=1 for normalization to flat light curve
-10e5   0  wid,af    width and amplitude central absorption fudge
-end of parameter input file
+0     ih       legacy positive log objective; 1=unweighted least squares
+0     iw       0=unweighted; 1=Gaussian errors; 2=full covariance precision file
+0.0  0.0       pb0,pb1 periodic open exclusion interval; equal bounds exclude nothing
+7     ns       floating-default kernel exp(-r^2/ns^2), in map pixels
+8e-4  ac       optimizer stationarity tolerance
+1000  nim      maximum iterations per regularization value
+0.002 1.7 0    al0,alf,nal starting alpha, divisor, attempts (0=one)
+1.6   clim     RMS target, not reduced chi-square
+2     ipri     log verbosity
+0     norm     preserve phase-dependent flux; 1=conditional flat-flux normalization
+10e5  0        wid,af empirical absorption scale cm/s and amplitude (0=disabled)
+0.0 0 0.1      instrumental sigma cm/s, minimum exposure samples, baseline fraction

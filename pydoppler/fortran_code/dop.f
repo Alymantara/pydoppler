@@ -1,7 +1,51 @@
+      module dop_science
+      implicit none
+      integer :: stat_iw=0, nphase=0, nvelocity=0
+      integer :: phase_subsamples=0, statistic_rank=0
+      real*8 :: flux_scale=1.d0, instrument_sigma=0.d0
+      real*8 :: baseline_fraction=0.1d0
+      real*8 :: solver_objective=0.d0,solver_stationarity=0.d0
+      real*8, allocatable :: precision(:,:,:),stat_weights(:)
+      real*8, allocatable :: normalization(:)
+      integer, allocatable :: covariance_rank(:)
+      logical, allocatable :: phase_valid(:)
+      contains
+      subroutine apply_precision(residual,weighted,quadratic)
+      implicit none
+      real*8, intent(in) :: residual(*)
+      real*8, intent(out) :: weighted(*),quadratic
+      real*8 :: rv(nvelocity),zv(nvelocity)
+      integer :: ip,iv,k
+      quadratic=0.d0
+      do ip=1,nphase
+        do iv=1,nvelocity
+          k=ip+(iv-1)*nphase
+          rv(iv)=residual(k)
+          weighted(k)=0.d0
+        enddo
+        if (.not.phase_valid(ip)) cycle
+        if (stat_iw.eq.2) then
+          zv=matmul(precision(:,:,ip),rv)
+        else
+          do iv=1,nvelocity
+            k=ip+(iv-1)*nphase
+            zv(iv)=stat_weights(k)*rv(iv)
+          enddo
+        endif
+        do iv=1,nvelocity
+          k=ip+(iv-1)*nphase
+          weighted(k)=zv(iv)
+        enddo
+        quadratic=quadratic+dot_product(rv,zv)
+      enddo
+      end subroutine
+      end module dop_science
+
       program dopmap
-c Version 2.0
-c HCS 3-3-1999
-c version for arbitrary phase bins
+      use dop_science
+      use, intrinsic :: ieee_arithmetic
+c Based on H. C. Spruit's 1999 floating-default maximum-entropy code.
+c Revised likelihood, optimization, quadrature and physical output units.
       implicit real*8 (a-h,o-z)
       real*4 dpx
       include 'emap.par'
@@ -26,13 +70,11 @@ c      fpstat(fpze)=.true.
 c      fpstat(fpxe)=.false.
 c      call fpsets(fpstat)
 c      call signal(sigtrap,xl__trce)
-      pi2=8*atan(1.)
+      pi2=8.d0*atan(1.d0)
 
 c read parameter file
       call repar(ns,ac,nim,
      *     al0,alf,nal,clim,ipri,spec,ih,iw,pb0,pb1,norm)
-c set baseline level to be added to spectrum (fraction of the avg of entire spectrum)
-      bfa=0.1
 c read input data
       open(4,file=spec)
       read(4,*) nph,nvp,w0
@@ -58,39 +100,38 @@ c make blanking array corresponding to (pb0,pb1)
       call blanks(pha,nph,pb0,pb1)
       read(4,*) (vp(i),i=1,nvp)
       read(4,*) (dat(i),i=1,nil)
-      if (iw.eq.1) read(4,*) (eb(i),i=1,nil)
+      if (iw.ge.1) read(4,*) (eb(i),i=1,nil)
       close(4)
-      call clock(t1)
+c Set one explicitly shared statistical model for likelihood and diagnostics.
+      stat_iw=iw
+      nphase=nph
+      nvelocity=nvp
+      allocate(stat_weights(nil),normalization(nph))
+      allocate(phase_valid(nph),covariance_rank(nph))
+      call statistical_input(dat,eb,iw,norm,nph,nvp)
+      if (iw.ge.1) ih=1
+      call cpu_time(t1)
       call prom(va,nv,pha,nph,vp,nvp,pt,p)
-      call clock(t2)
+      call cpu_time(t2)
       write(10,'('' cpu for geometry'',f10.2)')t2-t1
       if (ipri.gt.0) write(*,'('' cpu for geometry'',f10.2)')t2-t1
       t1=t2
-c compute a baseline flux to add to dat
-      call basel(dat,nph,nvp,bfa,bf,nv,va,pt,datb,vmb)
-c add baseline to dat, put weighting map into dato
+c A deterministic projected baseline permits signed continuum residuals.
+      call basel(dat,nph,nvp,baseline_fraction,bf,nv,va,
+     *           pt,datb,vmb)
       do i=1,nil
         dat(i)=dat(i)+datb(i)
-        if (dat(i).lt.bf/3) then
-          dat(i)=1e-5*bf
-          dato(i)=0
-        else
-          dato(i)=1
-        endif
       enddo
-c normalize to constant wavelength-integrated flux
-      if (norm.eq.1) call norms(dat,pb0,pb1,pha,nph,nvp)
-c sum of light
       sdat=0
-      do i=1,nil
-        sdat=sdat+dat(i)
+      nvalid=0
+      do ip=1,nph
+        if (.not.phase_valid(ip)) cycle
+        nvalid=nvalid+1
+        do iv=1,nvp
+          sdat=sdat+dat(ip+(iv-1)*nph)
+        enddo
       enddo
-
-c make error bars relative
-      do i=1,nil
-        eb(i)=eb(i)/dat(i)
-      enddo
-c weights
+      sdat=sdat*nph/nvalid
       call weighd(dat,datb,pha,nph,nvp,eb,iw)
 
 c reconstruction
@@ -101,14 +142,25 @@ c initialize (flat)
 c decreasing sequence of alfas until required fit to input data
       call alfs(dat,eb,iw,p,pt,al0,alf,nal,ac,nim,vmo,
      *           dato,nil,nol,nit,al,rr,ns,ih,clim,ipri,ier,t2,sx)
-      if (ier.eq.2) then
-        write(*,'('' no converged models, returning starting image'')')
-        al=al0
-        rr=100
-      endif
-      if (ier.eq.1) write(*,'('' last converged model has rr='',
-     *    f7.4,'', >clim='',f7.4)') rr,clim
-      if (ipri.gt.0) write(*,'('' entropy'', 1pe12.4)')sx
+      open(12,file='dop.status',status='replace')
+      iconverged=0
+      if (ier.eq.0.and.ieee_is_finite(rr)) iconverged=1
+      write(12,*) 'converged ',iconverged
+      write(12,*) 'optimizer_status ',ier
+      write(12,*) 'fit_statistic ',rr
+      write(12,*) 'fit_target ',clim
+      write(12,*) 'iterations ',nit
+      write(12,*) 'alpha ',al
+      write(12,*) 'entropy ',sx
+      write(12,*) 'objective ',solver_objective
+      write(12,*) 'stationarity ',solver_stationarity
+      write(12,*) 'flux_scale ',flux_scale
+      write(12,*) 'likelihood ',ih
+      write(12,*) 'weight_mode ',iw
+      write(12,*) 'statistic_rank ',statistic_rank
+      close(12)
+      if (iconverged.ne.1) stop 1
+      if (.not.all(ieee_is_finite(vmo(1:nol)))) stop 1
 c make an identification number
       s1=0
       s2=0
@@ -120,47 +172,60 @@ c make an identification number
       do i=1,nil,m
         s2=s2+dat(i)
       enddo
-      fident=sin(100*(s1/s2))
-c normalize dopmap to input units (probably mJy's) x Hz per (cm/s)^2 in v-space
+      fident=0.d0
+      if (abs(s2).gt.tiny(1.d0)) fident=sin(100*(s1/s2))
+c Map density: input spectral-density units per km/s.
+c Its velocity-area integral equals the line integral over radial km/s.
 c velocity grid size
       dv=2*va/(nv-1)
       delv2=dv**2
-c frequency grid size
+c Spectral velocity interval (stored in cm/s).
       dev=(vp(nvp)-vp(1))/(nvp-1)
-      denu=dev/w0*1e8
+      denu=dev*1.d5
       do i=1,nol
-        vmo(i)=(vmo(i)-vmb(i))/delv2*denu
+        vmo(i)=(vmo(i)-vmb(i))*flux_scale/delv2*denu/nph
+      enddo
+c Restore spectra to their original physical flux scale for diagnostics.
+      do ip=1,nph
+        do iv=1,nvp
+          i=ip+(iv-1)*nph
+          dat(i)=(dat(i)-datb(i))*flux_scale/normalization(ip)
+          dato(i)=(dato(i)-datb(i))*flux_scale/normalization(ip)
+          datb(i)=0.d0
+        enddo
       enddo
 c make unfolded reconstructed image
+      reco=0.d0
+      dpxu=0.d0
       do j=1,nol
         reco(indx(j),indy(j))=vmo(j)
       enddo
 
       open(3,file='dop.out')
 c write array sizes, w0, identification
-      write(3,'(3i5,f10.3,f20.15)')nph,nvp,nvm,w0,fident
+      write(3,*) nph,nvp,nvm,w0,fident
 c copy second line of input data file
       write(3,*)idat
 c copy phase and velocity coordinates of input spectrum
-      write(3,'(1p8e13.4E3)')(pha(i),i=1,nph)
+      write(3,'(1p8e24.15E3)')(pha(i),i=1,nph)
       write(3,*)iph
-      if (iph.eq.1) write(3,'(1p8e13.4E3)')(dpha(i),i=1,nph)
-      write(3,'(1p8e13.4E3)')(vp(i),i=1,nvp)
+      if (iph.eq.1) write(3,'(1p8e24.15E3)')(dpha(i),i=1,nph)
+      write(3,'(1p8e24.15E3)')(vp(i),i=1,nvp)
 c write input spectrum
-      write(3,'(1p8e13.4E3)')(dat(i)-datb(i),i=1,nil)
-      write(3,'(2i3,2f7.3,i4,2e13.4E3,f7.3,i3,e13.4E3,f7.3)')
+      write(3,'(1p8e24.15E3)')(dat(i)-datb(i),i=1,nil)
+      write(3,*)
      *      ih,iw,pb0/pi2,pb1/pi2,ns,ac,al,clim,norm,wid,af
 c write dopmap and reco
-      write(3,'(i4,1pe13.4E3,'' dopmap '')')nv,va
-      write(3,'(1p6e13.4E3)')((reco(i,j),j=1,nv),i=1,nv)
+      write(3,*) nv,va,' dopmap '
+      write(3,'(1p6e24.15E3)')((reco(i,j),j=1,nv),i=1,nv)
       write(3,'(i6,'' reconstructed data '')')nil
-      write(3,'(1p6e13.4E3)')(dato(i)-datb(i),i=1,nil)
+      write(3,'(1p6e24.15E3)')(dato(i)-datb(i),i=1,nil)
       write(3,'(i6,'' 4  change maps '')')nv
       do ii=1,4
         do j=1,nol
           dpxu(indx(j),indy(j))=dpx(j,ii)
         enddo
-        write(3,'(1p6e13.4E3)')((dpxu(i,j),j=1,nv),i=1,nv)
+        write(3,'(1p6e24.15E3)')((dpxu(i,j),j=1,nv),i=1,nv)
       enddo
       close(3)
       end
@@ -170,15 +235,125 @@ c      include '/usr/include/fpdc.h'
 c      include '/usr/include/fpdt.h'
 c      end
 
+      subroutine statistical_input(dat,eb,iw,norm,nph,nvp)
+      use dop_science
+      use, intrinsic :: ieee_arithmetic
+      implicit real*8 (a-h,o-z)
+      include 'emap.par'
+      dimension dat(*),eb(*)
+      common/blank/bl(npm)
+      logical bl
+      phase_valid=.not.bl
+      normalization=1.d0
+      covariance_rank=nvp
+      if (count(phase_valid).eq.0) then
+        write(*,*) 'No unmasked orbital phases remain.'
+        stop 1
+      endif
+      if (iw.lt.0.or.iw.gt.2) stop 1
+      do i=1,nph*nvp
+        if (.not.ieee_is_finite(dat(i))) stop 1
+        if (iw.ge.1) then
+          if (.not.ieee_is_finite(eb(i)).or.eb(i).le.0) stop 1
+        else
+          eb(i)=1.d0
+        endif
+      enddo
+      if (iw.eq.2) then
+        allocate(precision(nvp,nvp,nph))
+        open(13,file='dop.precision',status='old',iostat=ios)
+        if (ios.ne.0) stop 1
+        read(13,*,iostat=ios) npcheck,nvcheck
+        if (ios.ne.0.or.npcheck.ne.nph.or.nvcheck.ne.nvp) stop 1
+        do ip=1,nph
+          read(13,*,iostat=ios) covariance_rank(ip)
+          if (ios.ne.0.or.covariance_rank(ip).lt.1.or.
+     *        covariance_rank(ip).gt.nvp) stop 1
+          read(13,*,iostat=ios)
+     *       ((precision(i,j,ip),j=1,nvp),i=1,nvp)
+          if (ios.ne.0) stop 1
+          if (.not.all(ieee_is_finite(precision(:,:,ip)))) stop 1
+        enddo
+        close(13)
+      endif
+c Optional exact normalization uses the continuum-subtracted line integral.
+      if (norm.eq.1) then
+        avg=0.d0
+        do ip=1,nph
+          if (.not.phase_valid(ip)) cycle
+          su=0.d0
+          do iv=1,nvp
+            su=su+dat(ip+(iv-1)*nph)
+          enddo
+          if (su.le.0.d0) then
+            write(*,*) 'Phase normalization requires positive line flux.'
+            stop 1
+          endif
+          normalization(ip)=su
+          avg=avg+su
+        enddo
+        avg=avg/count(phase_valid)
+        do ip=1,nph
+          if (phase_valid(ip)) normalization(ip)=avg/normalization(ip)
+        enddo
+      endif
+      do ip=1,nph
+        do iv=1,nvp
+          k=ip+(iv-1)*nph
+          dat(k)=dat(k)*normalization(ip)
+          eb(k)=eb(k)*normalization(ip)
+        enddo
+      enddo
+c Stable RMS scale makes every subsequent numerical choice unit invariant.
+      vmax=0.d0
+      do ip=1,nph
+        if (.not.phase_valid(ip)) cycle
+        do iv=1,nvp
+          vmax=max(vmax,abs(dat(ip+(iv-1)*nph)))
+        enddo
+      enddo
+      if (vmax.le.0.d0) then
+        write(*,*) 'No nonzero unmasked line flux remains.'
+        stop 1
+      endif
+      su=0.d0
+      do ip=1,nph
+        if (.not.phase_valid(ip)) cycle
+        do iv=1,nvp
+          su=su+(dat(ip+(iv-1)*nph)/vmax)**2
+        enddo
+      enddo
+      flux_scale=vmax*sqrt(su/(count(phase_valid)*nvp))
+      do i=1,nph*nvp
+        dat(i)=dat(i)/flux_scale
+        eb(i)=eb(i)/flux_scale
+      enddo
+      statistic_rank=0
+      do ip=1,nph
+        if (phase_valid(ip)) statistic_rank=statistic_rank+
+     *      covariance_rank(ip)
+        if (iw.eq.2) precision(:,:,ip)=precision(:,:,ip)*
+     *      (flux_scale/normalization(ip))**2
+      enddo
+      open(13,file='dop.normalization',status='replace')
+      write(13,*) nph
+      do ip=1,nph
+        write(13,*) normalization(ip)
+      enddo
+      close(13)
+      end
+
       subroutine basel(dat,nph,nvp,bfa,bf,nv,va,pt,datb,vmb)
 c compute a baseline flux to get a flat background level in dopmap
 c datb is the data corresponding to a flat (circular) dopmap
 c vmb is the corresponding flat dopmap
+      use dop_science
       implicit real*8 (a-h,o-z)
       include 'emap.par'
       common /foldn/ nvf,indx(nr),indy(nr),nol
       dimension dat(*),datb(*),vmb(*)
-      if (nol.gt.nr) call errb('nol>nr',nol,nr)
+      real*4 pt(nri,nd)
+      if (nol.gt.nr) call erri('nol>nr',nol,nr)
 
 c make circle of radius va on a zero background
       fv2=nv/2.
@@ -189,28 +364,29 @@ c make circle of radius va on a zero background
         vx=dv*(ix-fv2-0.5)
         vy=dv*(iy-fv2-0.5)
         v=sqrt(vx**2+vy**2)
-        vmb(ir)=0.
-        if (v.lt.va) vmb(ir)=1
+        vmb(ir)=1.d0
       enddo
 
       nil=nph*nvp
 c produce spectrum from this map
       call fproj(pt,nil,nol,vmb,datb)
-c value at v=0
-      d0=datb(nvp/2*nph)
-c find avg of dat
-      avg=0.
+c Normalize the projected flat image by its largest positive bin.
+      d0=maxval(datb(1:nil))
+      if (d0.le.0.d0) stop 1
+      bf=bfa
       do i=1,nil
-        avg=avg+dat(i)
+        ip=mod(i-1,nph)+1
+        if (.not.phase_valid(ip)) cycle
+        if (datb(i).gt.0.d0) then
+          bf=max(bf,(-dat(i)+1.d-10)*d0/datb(i))
+        else if (dat(i).lt.0.d0) then
+          stop 1
+        endif
       enddo
-      avg=avg/nil
-c baseline level to add
-      bf=bfa*avg
-c normalize datb
+      bf=max(bf,1.d-10)
       do i=1,nil
         datb(i)=bf*datb(i)/d0
       enddo
-c normalize background map
       do j=1,nol
         vmb(j)=vmb(j)*bf/d0
       enddo
@@ -218,193 +394,68 @@ c normalize background map
       end
 
       subroutine blanks(pha,nph,pb0,pb1)
-c make blanking array corresponding to (pb0,pb1)
-c pb0-pb1: phase range with weight 0 (used for ignoring eclipsed part of data)
       implicit real*8 (a-h,o-z)
       include 'emap.par'
       dimension pha(*)
       common/blank/bl(npm)
       logical bl
-      pi2=8*atan(1.)
-c get max and min values of phase
-      phmin=pha(1)
-      phmax=pha(1)
-      do i=2,nph
-        if (pha(i).lt.phmin) phmin=pha(i)
-        if (pha(i).gt.phmax) phmax=pha(i)
-      enddo
-c number of cycles present
-      nphmi=int(phmin/pi2)
-      if (nphmi.lt.0.) nphmi=nphmi-1
-      nphma=int(phmax/pi2)
-      if (nphma.lt.0.) nphma=nphma-1
-c reduce blanking region to phases around 0
-      npb1=int(pb1/pi2)
-      if (npb1.lt.0.) npb1=npb1-1
-      pb0=pb0-npb1*pi2
-      pb1=pb1-npb1*pi2
+      pi2=8.d0*atan(1.d0)
+      width=(pb1-pb0)/pi2
+      tolerance=16.d0*epsilon(1.d0)
       do i=1,nph
-c use only non-blanked region for making average
-        bl(i)=.false.
-        do ic=nphmi,nphma+1
-          if (pha(i).gt.pb0+ic*pi2.and.pha(i).lt.pb1+ic*pi2)
-     *      bl(i)=.true.
-        enddo
+        distance=modulo((pha(i)-pb0)/pi2,1.d0)
+        bl(i)=distance.gt.tolerance.and.distance.lt.width-tolerance
       enddo
-      return
-      end
-
-      subroutine norms(dat,pb0,pb1,pha,nph,nvp)
-c normalize by a phase-dependent factor to make wavelength-integrated
-c light constant with phase.
-      implicit real*8 (a-h,o-z)
-      include 'emap.par'
-      dimension dat(npm,nvpm),pha(*),wi(npm)
-      common/blank/bl(npm)
-      logical bl
-      pi2=8*atan(1.)
-      ws=0
-      np=0
-c use only non-blanked region for making average
-      do i=1,nph
-        wi(i)=0
-        if (.not.bl(i)) then
-          np=np+1
-          do j=1,nvp
-            wi(i)=wi(i)+dat(i,j)
-          enddo
-        endif
-        ws=ws+wi(i)
-      enddo
-      ws=ws/np
-      do i=1,nph
-        wi(i)=wi(i)/ws
-      enddo
-c measure minimum of wi
-      wim=0
-      do i=1,nph
-        if (wi(i).lt.wim) wim=wi(i)
-      enddo
-c set an overall level to be added before normalization
-      wl=0
-      wlm=0.3
-      if (wim.lt.wlm) then wl=wlm-wim
-      do i=1,nph
-        if (wi(i).ne.0.) then
-          do j=1,nvp
-            dat(i,j)=dat(i,j)*(1+wl)/(wi(i)+wl)
-          enddo
-        endif
-      enddo
-      return
       end
 
       subroutine alfs(dat,eb,iw,p,pt,al0,alf,nal,ac,nim,vmo,
      *           dato,nil,nol,nit,alx,rr,ns,ih,clim,ipri,ier,t2,sx)
-c sequence of models with decreasing alfas, starting at al0, in factors
-c of alf, max no of models nal, each converged to accuracy ac, until
-c rms difference with input data dat is less than clim
-c ier=0:  normal return
-c ier=1:  last converged model differs more than clim from input light curve
-c ier=2:  no converged models in entire sequence
+      use, intrinsic :: ieee_arithmetic
       implicit real*8 (a-h,o-z)
       include 'emap.par'
-c dopmaps
-      dimension vm1(nr),vmo(*)
-c projection matrix
+      dimension vm1(nr),vmo(*),dat(nd),eb(nd),dat1(nd),dato(nd)
       real*4 p(nfp,nr),pt(nrp,nf)
-c input data
-      dimension dat(nd),eb(nd),dat1(nd),dato(nd)
-c parameters of penalty functions
-      logical cont
-      ier=0
-c copy input into temporary image
-      do j=1,nol
-        vm1(j)=vmo(j)
-      enddo
-c initialize number of converged models
-      nco=0
-c alpha- loop
-      rr=100
-      ial=0
-      cont=.true.
-      call clock(t2)
-      t1=t2
-c if nal<0 converge abs(nal) models irrespective of clim
-      if (nal.lt.0) then
-        nal1=-nal
-      else
-        nal1=nal
-      endif
-      do while (ial.lt.nal1.and.(rr.gt.clim.or.nal.lt.0).and.cont)
-        ial=ial+1
-c next alfa value
-        if (nal.lt.0) then
-          al=al0*alf**(1-ial)
-        else
-          al=alfa(al0,ial,alf,rr,clim)
-        endif
+      vm1(1:nol)=vmo(1:nol)
+      ier=1
+      nit=0
+      rr=huge(1.d0)
+      sx=0.d0
+      alx=al0
+      nal1=max(1,abs(nal))
+      call cpu_time(t1)
+      do ial=1,nal1
+        al=al0/alf**(ial-1)
         aci=ac
-        flim=1e5
-c converge with Lucy's ME scheme
-        call rldop(dat,p,pt,al,ac,flim,nim,vm1,nil,nol,nit,hs,
-     *           ns,ih,ipri,sf,ierr)
-        if (ierr.eq.1) write(10,'('' not converged'')')
-        if (ierr.eq.2) write(10,'('' not monotonic'')')
-        if (ierr.eq.3) write(10,'('' not converged, not monotonic'')')
-        if (ierr.eq.4) write(10,'('' stuck at vanishing updates'')')
-        if (ipri.gt.0) then
-          if (ierr.eq.1) write(*,'('' not converged'')')
-          if (ierr.eq.2) write(*,'('' not monotonic'')')
-          if (ierr.eq.3) write(*,'('' not converged, not monotonic'')')
-          if (ierr.eq.4) write(*,'('' stuck at vanishing updates'')')
-        endif
-c reconstructed spectrum
+        call rldop(dat,p,pt,al,aci,1.d5,nim,vm1,nil,nol,
+     *             nit,hs,ns,ih,ipri,sf,ierr)
         call fproj(pt,nil,nol,vm1,dat1)
-c converged at this alpha, save.
-          nco=nco+1
-          do j=1,nol
-            vmo(j)=vm1(j)
-          enddo
-          do k=1,nil
-            dato(k)=dat1(k)
-          enddo
-          alx=al
-          sx=sf
-c rms difference w/r input light curve
-        rr0=rr
         rr=rrms(dat,eb,iw,dat1,nil)
-        if (iw.eq.0) then
-c measure accuracy of reconstruction relative to point-to-point noise in data
-          rn=rmsn(dat,dat1)
-          rr=rr/rn
-        endif
-c summary of this iteration to activity log file
-        write(10,'('' ni, al, hs, rr:'',i5,
-     *       f8.5,e17.9,2f8.5)')nit,al,hs,rr,clim
-        call clock(t2)
-        write(10,'('' cpu for iteration'',f8.2)')t2-t1
-        if (ipri.gt.0) then
-          write(*,'('' ni, al, hs, rr:'',i5,
-     *       f8.5,e17.9,2f8.5)')nit,al,hs,rr,clim
-          write(*,'('' cpu for iteration'',f8.2)')t2-t1
-        endif
+        alx=al
+        sx=sf
+        write(10,*) 'ni, al, hs, rr:',nit,al,hs,rr,clim
+        call cpu_time(t2)
+        write(10,*) 'cpu for iteration ',t2-t1
         t1=t2
-c continue if no converged models found yet, or if acceptable error
-c return from last model
-        cont = nco.eq.0.or.ierr.eq.0.or.ierr.eq.2
+        if (ierr.ne.0.or..not.ieee_is_finite(rr)) then
+          ier=10+ierr
+          if (ierr.eq.0) ier=19
+          write(10,*) 'optimizer failure ',ier
+          return
+        endif
+c Only an optimizer-converged solution can replace the previous model.
+        vmo(1:nol)=vm1(1:nol)
+        dato(1:nil)=dat1(1:nil)
+        if (rr.le.clim) then
+          ier=0
+          return
+        endif
       enddo
-      if (nco.eq.0) ier=2
-      if (.not.cont) then
-        ier=1
-        rr=rr0
-      endif
-      return
       end
 
       subroutine repar(ns,ac,nim,
      *     al0,alf,nal,clim,ipri,spec,ih,iw,pb0,pb1,norm)
 c read input parameters
+      use dop_science
       implicit real*8 (a-h,o-z)
       include 'emap.par'
       character*(*) spec
@@ -413,7 +464,7 @@ c output channels
       dimension kch(2)
       common /fold/ nvx,nvy
       common /cabsf/ wid,af
-      pi2=8*atan(1.)
+      pi2=8.d0*atan(1.d0)
 c input data file
       open(4,file='dop.in')
 c type of likelihood to be used (0=log, 1=weighted log, 2=rms, 3=weighted rms)
@@ -461,6 +512,15 @@ c central absorption parameters
         wid=1
         af=0
       endif
+      read(4,*,iostat=ios) instrument_sigma,phase_subsamples,
+     *                     baseline_fraction
+      if (ios.ne.0) then
+        instrument_sigma=0.d0
+        phase_subsamples=0
+        baseline_fraction=0.1d0
+      endif
+      if (instrument_sigma.lt.0.or.phase_subsamples.lt.0.or.
+     *    baseline_fraction.lt.0) stop 1
       close (4)
       kch(2)=6
       kch(1)=10
@@ -535,204 +595,136 @@ c central absorption parameters
       end
 
       subroutine prom(va,nv,pha,nph,vpa,nvp,pt,p)
-c projection matrix
+      use dop_science
       implicit real*8 (a-h,o-z)
       include 'emap.par'
-      dimension pha(*),vpa(*)
+      dimension pha(*),vpa(*),vpl(nvpm+1),ww(nvpm)
       common/phases/dpha(npm)
-c pha: mid-exposure phases, dpha: length of phase intervals
       real*4 pt(nri,nd),p(ndi,nr)
-c ninpt: stores length of first index of pt, ninp: same for p
       common /pdop/ indpt(nri,nd),indp(ndi,nr),ninpt(nd),ninp(nr)
       common /foldn/ nvf,indx(nr),indy(nr),nol
-c cos/sin tables
-      dimension cfl(npm),sfl(npm),cfu(npm),sfu(npm)
-c lower and upper edges phase bins
-      dimension phl(npm),phu(npm),dph(npm)
-      dimension vpl(-1:nvpm+2)
-c array for temp storage of sums of projection matrix
-      dimension s(nr)
-c parameters for `central absorption'
       common /cabsf/ wid,af
-      va=dmax1(abs(vpa(1)),vpa(nvp))
-
-      nil=nph*nvp
-      fv2=nv/2.
+      real*8 kernel_cdf
+      integer edge_bin
+      va=max(abs(vpa(1)),abs(vpa(nvp)))
       dv=2*va/(nv-1)
-      dvi=(vpa(nvp)-vpa(1))/(nvp-1)
-      do ip=1,nph
-        phl(ip)=pha(ip)-dpha(ip)/2
-        phu(ip)=pha(ip)+dpha(ip)/2
-        cfl(ip)=cos(phl(ip))
-        cfu(ip)=cos(phu(ip))
-        sfl(ip)=sin(phl(ip))
-        sfu(ip)=sin(phu(ip))
-      enddo
-c lower edges of velocity bins
+      dvi=minval(vpa(2:nvp)-vpa(1:nvp-1))
+      if (dvi.le.0.d0.or.nv.lt.2) stop 1
       do iv=1,nvp-1
-        vpl(iv+1)=(vpa(iv)+vpa(iv+1))/2
+        vpl(iv+1)=(vpa(iv)+vpa(iv+1))/2.d0
       enddo
-      vpl(1)=vpa(1)-(vpa(2)-vpa(1))/2
-      vpl(nvp+1)=vpa(nvp)+(vpa(nvp)-vpa(nvp-1))/2
-      vpl(0)=vpl(1)-(vpl(2)-vpl(1))
-      vpl(-1)=-10*va
-      vpl(nvp+2)=10*va
-c reset index arrays
-      do i=1,nd
-        ninpt(i)=0
-      enddo
-      do i=1,nr
-        ninp(i)=0
-      enddo
-c reset x-y counter and bounds check flag
+      vpl(1)=vpa(1)-(vpa(2)-vpa(1))/2.d0
+      vpl(nvp+1)=vpa(nvp)+(vpa(nvp)-vpa(nvp-1))/2.d0
+      ninp=0
+      ninpt=0
       ir=0
-      ierp=0
+      icpm=0
+      icm=0
       do ix=1,nv
-c x-velocity (grid defined by this statement). Min and max of vx are (-va,va)
-        vx=dv*(ix-fv2-0.5)
+        vx=dv*(ix-(nv+1)/2.d0)
         do iy=1,nv
-c y-velocity (grid defined by this statement). Min and max of vy are (-va,va)
-          vy=dv*(iy-fv2-0.5)
-c use only points inside circle of radius va
-          if (vx**2+vy**2.lt.(va+dv/10)**2) then
-            ir=ir+1
-            if (ir.gt.nr) call erri('ir>nr in prom',ir,nr)
-            indx(ir)=ix
-            indy(ir)=iy
-            do ip=1,nph
-c line-of sight velocity at phase bin edges
-              vp0=vx*sfl(ip)-vy*cfl(ip)
-              vp1=vx*sfu(ip)-vy*cfu(ip)
-              if (vp0.gt.vp1) then
-                vpma=vp0+dv/2
-                vpmi=vp1-dv/2
-              else
-                vpma=vp1+dv/2
-                vpmi=vp0-dv/2
-              endif
-c estimate near which line-sight bins these are
-              ka=(vpma-vpl(1))/dvi+1
-              ki=(vpmi-vpl(1))/dvi+1
-              if (vpmi.lt.vpl(-1))
-     *            call errb('vpmi,vpl(-1):',vpmi,vpl(-1))
-              if (vpma.gt.vpl(nvp+2))
-     *            call errb('vpma,vpl(nvp+2):',vpma,vpl(nvp+2))
-c get first vpl(i)<vpma
-              ka=min(ka,nvpm+1)
-              ki=max(0,ki)
-              ki=min(ki,nvpm+1)
-              ka=max(0,ka)
-              if (vpl(ka).lt.vpma) then
-                do while (vpl(ka+1).lt.vpma)
-                  ka=ka+1
-                enddo
-              else
-                do while (vpl(ka-1).gt.vpma)
-                  ka=ka-1
-                enddo
-              endif
-c get first vpl(i)<vpmi
-              if (vpl(ki).lt.vpmi) then
-                do while (vpl(ki+1).lt.vpmi)
-                  ki=ki+1
-                enddo
-              else
-                do while (vpl(ki-1).gt.vpmi)
-                  ki=ki-1
-                enddo
-              endif
-              ka=min(ka,nvpm)
-              ki=max(1,ki)
+          vy=dv*(iy-(nv+1)/2.d0)
+          if (vx**2+vy**2.ge.(va+dv/10.d0)**2) cycle
+          ir=ir+1
+          if (ir.gt.nr) stop 1
+          indx(ir)=ix
+          indy(ir)=iy
+          do ip=1,nph
+            ww=0.d0
+c Midpoint quadrature resolves the maximum velocity excursion to <=1/8 bin.
+            nq=max(1,ceiling(abs(dpha(ip))*sqrt(vx*vx+vy*vy)/
+     *                      min(dv,dvi)*8.d0))
+            nq=max(nq,phase_subsamples)
+            if (nq.gt.100000) then
+              write(*,*) 'Exposure integration requires too many samples.'
+              stop 1
+            endif
+            do iq=1,nq
+              ph=pha(ip)+dpha(ip)*((iq-0.5d0)/nq-0.5d0)
+              vr=vx*sin(ph)-vy*cos(ph)
+              span=dv/2.d0+8.d0*instrument_sigma
+              ki=max(1,edge_bin(vr-span,vpl,nvp+1))
+              ka=min(nvp,edge_bin(vr+span,vpl,nvp+1))
+              vfa=1.d0+af*exp(-min((vr/wid)**2,50.d0))
+              if (vfa.le.0.d0) stop 1
               do iv=ki,ka
-c compute index of this phase-velocity point in data array
-                inp=ip+(iv-1)*nph
-                x0=(vpl(iv)-vpmi)/(vpma-vpmi)
-                x1=(vpl(iv+1)-vpmi)/(vpma-vpmi)
-                w=dist(x1)-dist(x0)
-c central absorption fudge
-                vpar=(vpma+vpmi)/2
-                vfa=1+af*exp(-dmin1((vpar/wid)**2,50.d0))
-                w=w/vfa
-c up counter for p
-                icp=ninp(ir)+1
-                if (icp.gt.ndi) then
-                  ierp=2
-                  icpm=max(icp,icpm)
-                endif
-                ninp(ir)=icp
-                if (ierp.ne.2) then
-c store matrix element and save data index
-                  p(icp,ir)=w
-                indp(icp,ir)=inp
-                endif
-c up counter for pt of number of hits in this bin
-                ic=ninpt(inp)+1
-                if (ic.gt.nri) then
-                  ierp=1
-                  icm=max(ic,icm)
-                endif
-                ninpt(inp)=ic
-                if (ierp.ne.1) then
-c store transpose element and save reconstruction index
-                  pt(ic,inp)=w
-                  indpt(ic,inp)=ir
-                endif
+                w=kernel_cdf(vpl(iv+1)-vr,dv/2.d0,
+     *                        instrument_sigma)-
+     *            kernel_cdf(vpl(iv)-vr,dv/2.d0,
+     *                        instrument_sigma)
+                ww(iv)=ww(iv)+max(w,0.d0)/(nq*nph*vfa)
               enddo
             enddo
-          endif
+            do iv=1,nvp
+              if (ww(iv).le.0.d0) cycle
+              inp=ip+(iv-1)*nph
+              icp=ninp(ir)+1
+              ic=ninpt(inp)+1
+              ninp(ir)=icp
+              ninpt(inp)=ic
+              icpm=max(icpm,icp)
+              icm=max(icm,ic)
+              if (icp.le.ndi.and.ic.le.nri) then
+                p(icp,ir)=ww(iv)
+                indp(icp,ir)=inp
+                pt(ic,inp)=ww(iv)
+                indpt(ic,inp)=ir
+              endif
+            enddo
+          enddo
         enddo
       enddo
-      if (ierp.ne.0) then
-        if (icpm.lt.ndi)icpm=ndi
-        if (icm.lt.nri)icm=nri
-        write(*,'('' ndi,nri:'',2i6)')ndi,nri
-        write(*,'('' projection matrix array too small. Need ndi,nri='',
-     *        2i6,2f7.3)')icpm,icm,float(icpm)/ndi,float(icm)/nri
-        write(10,'('' ndi,nri:'',2i6)')ndi,nri
-        write(10,'(''projection matrix array too small. Need ndi,nri='',
-     *        2i6)')icpm,icm
-        call wpar(npm,nvpm,nvm,icm,icpm)
-        stop
-      endif
       nol=ir
-c normalize p,pt
-      do ir=1,nol
-        s(ir)=0
-        do j=1,ninp(ir)
-          s(ir)=s(ir)+p(j,ir)
-        enddo
-        do j=1,ninp(ir)
-          p(j,ir)=p(j,ir)/s(ir)
-        enddo
+      if (icpm.gt.ndi.or.icm.gt.nri) then
+        write(10,*) 'ndi,nri:',ndi,nri
+        write(10,*) 'projection matrix array too small. Need ndi,nri=',
+     *              icpm,icm
+        call wpar(npm,nvpm,nvm,icm,icpm)
+        stop 2
+      endif
+      end
+
+      integer function edge_bin(x,edges,n)
+      implicit none
+      integer n,lo,hi,mid
+      real*8 x,edges(n)
+      lo=0
+      hi=n
+      do while (hi-lo.gt.1)
+        mid=(lo+hi)/2
+        if (edges(mid).le.x) then
+          lo=mid
+        else
+          hi=mid
+        endif
       enddo
-      do inp=1,nil
-        do j=1,ninpt(inp)
-          pt(j,inp)=pt(j,inp)/s(indpt(j,inp))
-        enddo
-      enddo
-c count storage requirements
-      ima=0
-      mninp=0
-      do ir=1,nol
-        len=ninp(ir)
-        mninp=mninp+len
-        if (len.gt.ima) ima=len
-      enddo
-      jma=0
-      mninpt=0
-      do inp=1,nil
-        len=ninpt(inp)
-        mninpt=mninpt+len
-        if (len.gt.jma) jma=len
-      enddo
-c      write(*,'('' max of data, reco counters: '',2i7)')ima,jma
-c      write(*,'('' reserved (emap.par) ndi,nri:'',2i7)')ndi,nri
-c      write(*,'('' fraction'',2f5.2)')float(ima)/ndi,float(jma)/nri
-c      x=float(mninp)/(jma*nd)
-c      write(*,'('' mninp,  jma*nd, frac: '',2i9,f7.3)')mninp,jma*nd,x
-c      x=float(mninpt)/(nr*ima)
-c      write(*,'('' mninpt, nr*ima, frac: '',2i9,f7.3)')mninpt,nr*ima,x
-      return
+      edge_bin=lo
+      end
+
+      real*8 function normal_second(x,sigma)
+      implicit none
+      real*8 x,sigma,z,cdf,pdf
+      z=x/sigma
+      cdf=0.5d0*erfc(-z/sqrt(2.d0))
+      pdf=exp(-0.5d0*z*z)/sqrt(8.d0*atan(1.d0))
+      normal_second=0.5d0*((x*x+sigma*sigma)*cdf+x*sigma*pdf)
+      end
+
+      real*8 function kernel_cdf(x,a,sigma)
+c CDF of the normalized triangular pixel basis convolved with a Gaussian LSF.
+      implicit none
+      real*8 x,a,sigma,dist,normal_second,z
+      if (sigma.le.0.d0) then
+        kernel_cdf=dist((x+a)/(2.d0*a))
+      else if (x.le.-a-8.d0*sigma) then
+        kernel_cdf=0.d0
+      else if (x.ge.a+8.d0*sigma) then
+        kernel_cdf=1.d0
+      else
+        z=(normal_second(x+a,sigma)-2.d0*normal_second(x,sigma)+
+     *     normal_second(x-a,sigma))/(a*a)
+        kernel_cdf=max(0.d0,min(1.d0,z))
+      endif
       end
 
       real*8 function dist(x)
@@ -759,12 +751,7 @@ c      write(*,'('' mninpt, nr*ima, frac: '',2i9,f7.3)')mninpt,nr*ima,x
       dimension x(2)
       write(*,'(a,2i10)')s,n1,n2
       write(10,'(a,2i10)')s,n1,n2
-c force error return in debugger
-      i=0
-      x(1)=0.
-      x(2)=0.
-      xx=x(i)
-      stop
+      stop 1
 c      return
       end
 
@@ -773,89 +760,41 @@ c      return
       character*(*) s
       dimension x(2)
       write(*,'(a,1p2e12.4)')s,x1,x2
-c force error return in debugger
-      i=0
-      x(1)=0.
-      x(2)=0.
-      xx=x(i)
-      stop
+      stop 1
 c      return
       end
 
       subroutine weighd(f,f0,pha,nph,nvp,eb,iw)
-c copy input weights
-c f    input data
-c f0   data resulting from a flat, circular, doppler map, used to calibrate weights
-c      to uniform value in doppler map
-c pha  phases
-c nph  length f-array
-c nvp  number of v-intervals
-c eb   input error bars (in case they were supplied with input data)
-c iw=0 internally generated weights only
-c iw=1 multiply internally generated weights by weights from light curve file
+      use dop_science
       implicit real*8 (a-h,o-z)
-      include 'emap.par'
       dimension f(*),f0(*),pha(*),eb(*)
-      common /weights/ w(nd)
-      common /blank/bl(npm)
-      logical bl
-      nil=nph*nvp
-      if (nil.gt.nd) call erri('nil>nd in weighd',nil,nd)
-      do i=1,nph
-        do j=1,nvp
-          inp=i+(j-1)*nph
-          w(inp)=1
-          if (f0(inp).eq.0.) w(inp)=0
-          if (bl(i)) w(inp)=0
+      do ip=1,nph
+        do iv=1,nvp
+          k=ip+(iv-1)*nph
+          stat_weights(k)=0.d0
+          if (.not.phase_valid(ip)) cycle
+          stat_weights(k)=1.d0
+          if (iw.eq.1) stat_weights(k)=1.d0/eb(k)**2
         enddo
       enddo
-      if (iw.eq.1) then
-c multiply by weights from error bars
-        do i=1,nil
-          w(i)=w(i)*f(i)/eb(i)
-        enddo
-      endif
-c normalize to average=1
-      x=0
-      do i=1,nil
-        x=x+w(i)
-      enddo
-      do i=1,nil
-        w(i)=w(i)/x*nph
-      enddo
-      return
       end
 
       subroutine rldop(pht,p,pt,al,ac,flim,nim,ps,nil,nol,nit,hs,
      *           ns,ih,ipri,s,ierr)
-c interface to rlfldn for doppler mapping
-c RL iteration with floating default, converged to accuracy ac
-c input:
-c pht: input data, nil: length of input data, nol: length of solution
-c p(i,j): probability p(x|xi), al: entropy weight, ac: accuracy of convergence,
-c pt: transpose of p,
-c flim: max acceleration parameter, nim: max no of iterations
-c ns: smearing width (passed on to chims)
-c ih: type of likelihood function (subroutines like, lamun)
-c ipri: printout control
-c out:
-c ps: solution, nit: no of iterations, hs: optimum function Q.
-c nit: number of iterations
-c s: entropy
-c ierr: 0 (OK), 1 (not converged) or 2 (not monotonic)
       implicit real*8 (a-h,o-z)
-      dimension pht(*),p(*),pt(*),ps(*)
-      dum=0
-      idum=1
-      epc=1
+      dimension pht(*),ps(*),epc(1)
+      integer inc(1,1),nsm(1,1),ico(1)
+      real*4 p(*),pt(*)
+      inc=1
+      nsm=ns
+      ico=1
+      epc=1.d0
       call rlfldn(pht,p,pt,al,ac,flim,nim,ps,nil,nol,nit,hs,
-     *           idum,idum,ns,epc,idum,dum,idum,ih,ipri,dum,s,ierr)
-      return
+     *           1,inc,nsm,epc,ico,0.d0,1,ih,ipri,0.d0,s,ierr)
       end
 
-      subroutine chims(ps,chi,id1,id2,id3,ns,du1,id4,du2,id5,du3)
+      subroutine chims(ps,chi,ns)
 c default map routine to interface dopmap with emap routines
-c id1-5 and du1-3 are dummies
       implicit real*8 (a-h,o-z)
       include 'emap.par'
       dimension ps(*),chi(nr)
@@ -882,53 +821,18 @@ c unfold y2
       return
       end
 
-      subroutine chimsi(ps,chi,id,k,nc,inc,ns,epc,ico,rdf,msu,wbkg)
-c default map routine to interface dopmap with emap routines.
-c since there are no sub-surfaces in dopmap, chimsi does the same thing
-c as chims
-      implicit real*8 (a-h,o-z)
-      call chims(ps,chi,id,nc,inc,ns,epc,ico,rdf,msu,wbkg)
-      return
-      end
-
       subroutine wpar(npm,nvpm,nvm,nri,ndi)
-c write a parameter file with updated values for npm,nvpm,nvm,nri,ndi
-      implicit real*8 (a-h,o-z)
-      open(11,file='emap.par.new')
-      write(11,'(''      parameter (npm='',i3,'',nvpm='',i3,
-     *           '',nvm='',i3,'')'')')npm,nvpm,nvm
-      write(11,'(''      parameter (nd=npm*nvpm,nr=nvm*nvm)'')')
-      write(11,'(''      parameter (nri='',i4,'',ndi='',i4,'')'')')
-     *      nri,ndi
-      write(11,'(''c parameters for emap routines'')')
-      write(11,'(''      parameter (nf=nd,nfp=ndi,nrp=nri)'')')
-      write(11,'(''      parameter (ni=nvm,nj=nvm)'')')
-      write(11,'(''      parameter (nch=1,nsu=1)'')')
+      implicit none
+      integer npm,nvpm,nvm,nri,ndi
+      open(11,file='emap.par.new',status='replace')
+      write(11,*) '      parameter (npm=',npm,',nvpm=',nvpm,
+     *            ',nvm=',nvm,')'
+      write(11,*) '      parameter (nd=npm*nvpm,nr=nvm*nvm)'
+      write(11,*) '      parameter (nri=',nri,',ndi=',ndi,')'
+      write(11,*) '      parameter (nf=nd,nfp=ndi,nrp=nri)'
+      write(11,*) '      parameter (ni=nvm,nj=nvm)'
+      write(11,*) '      parameter (nch=1,nsu=1)'
       close(11)
-      return
-      end
-
-      function alfa(al0,ial,alf,rr,clim)
-c next alfa value. last value is chosen to land rr close to clim
-      implicit real*8 (a-h,o-z)
-      common /alkeep/ rr2,rr1
-      rr1=rr2
-      rr2=rr
-      if (rr.gt.sqrt(alf)*clim.or.ial.lt.3) then
-        al=al0/alf**(ial-1)
-      else
-        dl2=log(rr1/rr2)
-        dl=log(rr/clim)
-        x=dl/dl2
-        if (x.gt.1.) then
-          al=al0/alf**(ial-1)
-        else
-          alfr=exp(x*log(alf))
-          al=al0/alf**(ial-2)/alfr
-        endif
-      endif
-      alfa=al
-      return
       end
 
       subroutine chimg(x2,y2,nam,ic,nbm,jc,im,ns)
@@ -937,14 +841,16 @@ c gaussian smearing with half-width ns, by consecutive 1-d smearing in x and y
       include 'emap.par'
       parameter (ms=100)
       dimension x2(ni,nj), y2(ni,nj)
-      common /first/ smp(-ms:ms),ns0,ns1
+      real*8 smp(-ms:ms)
+      integer, save :: ns0=-1,ns1=0
+      save smp
       dimension t1(-ms:ni+ms),t2(-ms:nj+ms)
       if (ns0.ne.ns) then
 c (re)make smearing matrix smp if value of ns is new.
         w=1.5
 c actual smearing width used is w times 1/e width
-        ns1=w*ns
-        if (ns1.gt.ms) call errb('ns1>ms in chimg',ns1,ms)
+        ns1=min(int(w*ns),ms,nam-1,nbm-1)
+        if (ns1.gt.ms) call erri('ns1>ms in chimg',ns1,ms)
         ns0=ns
         s=0
         do i=-ns1,ns1
@@ -1025,242 +931,115 @@ c smear t1, result into y2
 
       subroutine rlfldn(pht,p,pt,al,ac,flim,nim,ps,nil,nol,nit,hs,
      *           nc,inc,ns,epc,ico,rdf,msu,ih,ipri,wbkg,s,ierr)
-c RL iteration with floating default, converged to accuracy ac
-c input:
-c pht: input data, nil: length of input data, nol: length of solution
-c p(i,j): probability p(x|xi), al: entropy weight, ac: accuracy of convergence,
-c flim: max acceleration parameter, nim: max no of iterations
-c nil: no of phases, nol: size of image, nc: no of components of default,
-c epc: the weights of each of these components, inc: indices for the types of
-c component.
-c out:
-c ps: solution, nit: no of iterations, hs: optimum function Q.
-c ih: type of likelihood function (subroutines like, lamun)
-c ierr: 0 (OK), 1 (not converged) or 2 (not monotonic)
-c ipri: printout control
+c Positive, preconditioned gradient ascent with Newton acceleration and
+c an Armijo line search. No imposed flux sum: masked data have no effect.
+      use dop_science, only: solver_objective,solver_stationarity
+      use, intrinsic :: ieee_arithmetic
       implicit real*8 (a-h,o-z)
       real*4 dpx
       include 'emap.par'
       dimension pht(*),ps(*),inc(nch,nsu),ns(nch,nsu),epc(*),ico(*)
       real*4 p(nfp,nr),pt(nrp,nf)
-      dimension ph(nf),dha(nr),dsa(nr),chi(nr,nch),tem(nr),
-     *          ex(nr),dps(nr),dps0(nr)
+      dimension ph(nf),dha(nr),dsa(nr),chi(nr,nch),tem(nr),ex(nr)
+      dimension dps(nr),dps0(nr),up(nr),trial(nr),grad(nr)
       common /difpix/ dpx(nr,4)
-      ierr=0
-      del=1
-      nit=0
-      hs=0
-c sum of light curve
-      spt=0
-      do i=1,nil
-        spt=spt+pht(i)
-      enddo
-      do while (del.gt.ac.and.nit.lt.nim)
-        nit=nit+1
-c phi (forward projection step)
+      ierr=1
+      dps0=0.d0
+      dpx=0.
+      s=0.d0
+      hs=0.d0
+      do nit=0,nim
         call fproj(pt,nil,nol,ps,ph)
-c magic statement: On HP's, code crashes with bus error if this line is removed:
-        if (nit.lt.0) write(*,*)1
-        if (al.le.0.) then
-c measure convergence by diff between ph and pht
-          av=0
-          sm=0
-          do i=1,nil
-            av=av+pht(i)
-            sm=sm+(pht(i)-ph(i))**2
-          enddo
-          rm=sqrt(sm/nil)
-          av=av/nil
-          del=rm/av
-        endif
-c H and dH/dpsi
         call like(pht,ph,p,nil,nol,ih,h,dha)
-c sum of psi*dH/dpsi and sum of psi
-        su=0
-        sup=0
-        do j=1,nol
-          su=su+ps(j)*dha(j)
-          sup=sup+ps(j)
-        enddo
-c delta-H (in same array as dha)
-        do j=1,nol
-          dha(j)=dha(j)+(-su/sup+spt/sup-1)
-        enddo
-c entropy
-        if (al.gt.0.) call entr(ps,nil,nol,s,dsa,chi,tem,ex,nc,inc,ns,
-     *       epc,ico,rdf,msu,wbkg)
-c sum of psi*dS/dpsi
-        su=0
-        do k=1,nol
-          su=su+ps(k)*dsa(k)
-        enddo
-c Delta-S (in same array as dsa)
-        do j=1,nol
-          dsa(j)=dsa(j)-su/sup
-        enddo
-c save old value of Q
-        hs0=hs
-c current value of Q
+        dsa=0.d0
+        if (al.gt.0.d0) call entr(ps,nil,nol,s,dsa,chi,tem,ex,
+     *      nc,inc,ns,epc,ico,rdf,msu,wbkg)
         hs=h+al*s
-c warning if not monotonic
-        if (nit.ne.1.and.hs.lt.hs0) ierr=2
-c new dpsi
-        do j=1,nol
-          dps(j)=ps(j)*(dha(j)+al*dsa(j))
-        enddo
-        if (nit.eq.1) then
-          do j=1,nol
-            dps0(j)=dps(j)
-          enddo
+        solver_objective=hs
+        if (.not.ieee_is_finite(hs)) then
+          ierr=3
+          return
         endif
-
-c determine optimum direction and factor for update, from dps0 and dps.
-c (generalization of Lucy's acceleration)
-c derivatives of Q w/r to lambda and mu at current psi
+        su=0.d0
+        sh=0.d0
+        ss=0.d0
+        do j=1,nol
+          grad(j)=dha(j)+al*dsa(j)
+          dps(j)=ps(j)*grad(j)
+          su=su+dps(j)**2
+          sh=sh+(ps(j)*dha(j))**2
+          ss=ss+(ps(j)*al*dsa(j))**2
+        enddo
+        denom=max(sqrt(sh)+sqrt(ss),1.d-12)
+        del=sqrt(su)/denom
+        solver_stationarity=del
+        if (nit.eq.0.or.mod(nit,10).eq.0.or.del.le.ac)
+     *      write(10,*) 'iteration objective stationarity ',nit,hs,del
+        if (del.le.ac.or.sqrt(su).le.1.d-12) then
+          ierr=0
+          return
+        endif
+        if (nit.eq.nim) return
+        if (nit.eq.0) dps0(1:nol)=dps(1:nol)
         call lamun(pht,ps,dps0,dps,pt,ph,chi,tem,ex,al,nil,nol,
      *             fla,fmu,nc,inc,ns,epc,ico,rdf,msu,ih,wbkg)
-c length of multiplier
-        amu=sqrt(fla**2+fmu**2)
-c direction (normalized) of optimum
-        fla=fla/amu
-        fmu=fmu/amu
-c find max of amu
-        flm=0
-        jlm=0
-        do j=1,nol
-c value of prospective update
-          xx=fla*dps0(j)+fmu*dps(j)
-          if (xx.lt.0) then
-c positivity not maintained at this value of amu, get max
-            fl=-xx/ps(j)
-            if (fl.gt.flm) then
-              flm=fl
-              jlm=j
-            endif
-          endif
-        enddo
-        if (flm.gt.0.) then
-c positivity restriction limits amu
-c safety factor 0.9
-          flm=dmin1(flim,0.9/flm)
-        else
-c take overall limit
-          flm=flim
+        up(1:nol)=fla*dps0(1:nol)+fmu*dps(1:nol)
+        slope=dot_product(grad(1:nol),up(1:nol))
+        if (.not.ieee_is_finite(slope).or.slope.le.0.d0) then
+          up(1:nol)=dps(1:nol)
+          slope=dot_product(grad(1:nol),up(1:nol))
         endif
-        amu=dmin1(amu,flm)
-c check if amu has been small for awhile
-        call zcheck(amu,nit,20,0.01d0,ierr)
-        if (ierr.eq.4) return
-c having found amu, update psi
+        step=1.d0
         do j=1,nol
-          up=fmu*dps(j)+fla*dps0(j)
-          ps(j)=ps(j)+amu*up
-c save direction of old dps
-          dps0(j)=up
+          if (up(j).lt.0.d0) step=min(step,-0.99d0*ps(j)/up(j))
         enddo
-
-        if (al.gt.0.) then
-          del=0
-          do j=1,nol
-c measure of convergence (Lucy's eq 17)
-            dj=abs(dha(j)+al*dsa(j))/(abs(dha(j))+al*abs(dsa(j)))
-            del=del+dj**2
-          enddo
-          del=sqrt(del/nol)
-        endif
-c store change
-        do j=1,nol
-          dpx(j,mod(nit,4)+1)=dha(j)+al*dsa(j)
+        do ils=1,60
+          trial(1:nol)=ps(1:nol)+step*up(1:nol)
+          call fproj(pt,nil,nol,trial,ph)
+          call like(pht,ph,p,nil,nol,ih,hnew,dha)
+          snew=0.d0
+          if (al.gt.0.d0) call entr(trial,nil,nol,snew,dsa,
+     *        chi,tem,ex,nc,inc,ns,epc,ico,rdf,msu,wbkg)
+          qnew=hnew+al*snew
+          if (ieee_is_finite(qnew).and.
+     *        qnew.ge.hs+1.d-4*step*slope) exit
+          step=step/2.d0
         enddo
-c printout
-        if (nit.eq.1)  then
-          write(10,'(''  it        H+alfa*S        delta'')')
-          if (ipri.gt.1)
-     *      write(*,'('' it      H+alfa*S        delta'')')
+        if (ils.gt.60) then
+          ierr=2
+          return
         endif
-        if (nit.ne.1.and.hs.lt.hs0) then
-c line summary to activity log file
-          write(10,'(i4,1pe20.12,e11.2,'' **'')')nit,hs,del
-          if (ipri.gt.1)
-     *       write(*,'(i4,1pe20.12,e11.2,'' **'')')nit,hs,del
-        else
-          write(10,'(i4,1pe20.12,e11.2)')nit,hs,del
-          if (ipri.gt.1)
-     *       write(*,'(i4,1pe20.12,e11.2)')nit,hs,del
-        endif
-c  renormalize (mostly to strip accumulating numerical noise)
-        su=0
+        ps(1:nol)=trial(1:nol)
+        dps0(1:nol)=step*up(1:nol)
         do j=1,nol
-          su=su+ps(j)
-        enddo
-        do j=1,nol
-          ps(j)=ps(j)*spt/su
+          dpx(j,mod(nit,4)+1)=grad(j)
         enddo
       enddo
-      if (nit.ge.nim) then
-c not converged at this value of ac
-        hs=0
-c return last value of del
-        ac=del
-c error flag
-        ierr=ierr+1
-      endif
-      return
       end
 
       subroutine like(pht,ph,p,nil,nol,ih,h,dha)
-c likelihood function h and its derivative w/r psi, dha
+      use dop_science
       implicit real*8 (a-h,o-z)
       include 'emap.par'
-      dimension pht(*),ph(*),dha(*)
+      dimension pht(*),ph(*),dha(*),res(nf),phh(nf)
       real*4 p(nfp,nr)
-      dimension phh(nf)
-      common /weights/ w(nf)
-      h=0
-      if (ih.eq.0) then
-c log likelihood
+      h=0.d0
+      if (ih.eq.0.and.stat_iw.eq.0) then
         do i=1,nil
-          h=h+w(i)*(pht(i)*log(ph(i))-ph(i))
+          phh(i)=0.d0
+          if (stat_weights(i).eq.0.d0) cycle
+          pp=max(ph(i),tiny(1.d0))
+          h=h+pht(i)*log(pp)-pp
+          phh(i)=pht(i)/pp-1.d0
         enddo
       else
-c rms
         do i=1,nil
-          h=h-w(i)*(pht(i)-ph(i))**2
+          res(i)=pht(i)-ph(i)
         enddo
-c normalizing factor
-        h=h*nil
+        call apply_precision(res,phh,q)
+        h=-0.5d0*q
       endif
-c Delta-H
-      if (ih.eq.0) then
-c log likelihood
-        do i=1,nil
-          phh(i)=w(i)*(pht(i)/ph(i)-1)
-        enddo
-        call bproj(p,nil,nol,phh,dha)
-      else
-c rms
-        do i=1,nil
-          phh(i)=2*nil*w(i)*(pht(i)-ph(i))
-        enddo
-        call bproj(p,nil,nol,phh,dha)
-      endif
-      return
-      end
-
-      subroutine zcheck(amu,nit,nz,amc,ierr)
-c set ierr=4 if past nz amu values were less than amc
-      implicit real*8 (a-h,o-z)
-      common /zsave/ am(30)
-      if (nz.gt.30) call errb('nz>30 in zcheck',nz,30)
-      am(mod(nit,nz)+1)=amu
-      if (nit.ge.nz) then
-        ama=0
-        do i=1,nz
-          if(am(i).gt.ama) ama=am(i)
-        enddo
-        if (ama.lt.amc) ierr=4
-      endif
-      return
+      call bproj(p,nil,nol,phh,dha)
       end
 
       subroutine entr(ps,nil,nol,s,sp,chi,tem,ex,nc,inc,ns,epc,ico,
@@ -1273,9 +1052,9 @@ c output: s (S), sp (dS/dpsi)
       dimension ps(*),sp(*),chi(nr,nch),tem(*),ex(*),inc(nch,nsu),
      *          ns(nch,nsu),epc(*),ico(*)
       dimension x(nr),y(nr,nch)
-      if (nc.gt.nch) call errb('nc>nch in entr',nc,nch)
+      if (nc.gt.nch) call erri('nc>nch in entr',nc,nch)
 c make chi's
-      call chims(ps,chi,1,nc,inc,ns,epc,ico,rdf,msu,wbkg)
+      call chims(ps,chi(:,1),ns(1,1))
 c entropy
       s=0
       do j=1,nol
@@ -1301,7 +1080,7 @@ c add terms due to dependence of chi on psi
           do j=1,nol
             x(j)=(ps(j)-ex(j))/chi(j,k)
           enddo
-          call chimsi(x,y,-1,k,nc,inc,ns,epc,ico,rdf,msu,wbkg)
+          call chims(x,y(:,k),ns(k,1))
           do j=1,nol
             sp(j)=sp(j)+epc(k)*y(j,k)
           enddo
@@ -1313,19 +1092,20 @@ c add terms due to dependence of chi on psi
       subroutine lamun(pht,ps,dps1,dps2,pt,ph,chi,tem,ex,al,nil,nol,
      *                 fla,fmu,nc,inc,ns,epc,ico,rdf,msu,ih,wbkg)
 c optimal lambda and mu from first and second derivatives of Q
+      use dop_science
       implicit real*8 (a-h,o-z)
       include 'emap.par'
       dimension pht(*),ps(*),dps1(*),dps2(*),ph(*),chi(nr,nch),
      *          tem(*),ex(*),inc(nch,nsu),ns(nch,nsu),epc(*),ico(*)
       real*4 pt(nrp,nf)
       dimension dph1(nf),dph2(nf),dch1(nr,nch),dch2(nr,nch)
-      common /weights/ w(nf)
+      dimension rw(nf),z1(nf),z2(nf),res(nf)
 c changes in phi and chi corresponding to dps0, dps
       call fproj(pt,nil,nol,dps1,dph1)
       call fproj(pt,nil,nol,dps2,dph2)
       if (al.gt.0.) then
-        call chims(dps1,dch1,1,nc,inc,ns,epc,ico,rdf,msu,wbkg)
-        call chims(dps2,dch2,1,nc,inc,ns,epc,ico,rdf,msu,wbkg)
+        call chims(dps1,dch1(:,1),ns(1,1))
+        call chims(dps2,dch2(:,1),ns(1,1))
       endif
 c first and second derivatives
       hl=0
@@ -1338,37 +1118,34 @@ c first and second derivatives
       sm=0
       slm=0
       smm=0
-c likelihood term
-      if (ih.eq.0) then
-c log likelihood
+c Exact first and second directional derivatives of the likelihood.
+      if (ih.eq.0.and.stat_iw.eq.0) then
         do i=1,nil
-          phw=pht(i)*w(i)
-          dpp=pht(i)/ph(i)-1
-          xl=dph1(i)/ph(i)
-          xm=dph2(i)/ph(i)
-          hl=hl+w(i)*dph1(i)*dpp
-          hll=hll-xl**2*phw
-          hlm=hlm-xl*xm*phw
-          hm=hm+w(i)*dph2(i)*dpp
-          hmm=hmm-xm**2*phw
+          if (stat_weights(i).eq.0.d0) cycle
+          pp=max(ph(i),tiny(1.d0))
+          dpp=pht(i)/pp-1.d0
+          xl=dph1(i)/pp
+          xm=dph2(i)/pp
+          hl=hl+dph1(i)*dpp
+          hll=hll-xl**2*pht(i)
+          hlm=hlm-xl*xm*pht(i)
+          hm=hm+dph2(i)*dpp
+          hmm=hmm-xm**2*pht(i)
         enddo
       else
-c rms likelihood
         do i=1,nil
-          x=pht(i)-ph(i)
-          xl=dph1(i)
-          xm=dph2(i)
-          hl=hl+2*w(i)*x*xl
-          hll=hll-2*w(i)*xl**2
-          hlm=hlm-2*w(i)*xl*xm
-          hm=hm+2*w(i)*x*xm
-          hmm=hmm-2*w(i)*xm**2
+          res(i)=pht(i)-ph(i)
         enddo
-        hl=hl*nil
-        hm=hm*nil
-        hll=hll*nil
-        hmm=hmm*nil
-        hlm=hlm*nil
+        call apply_precision(res,rw,q)
+        call apply_precision(dph1,z1,q1)
+        call apply_precision(dph2,z2,q2)
+        do i=1,nil
+          hl=hl+dph1(i)*rw(i)
+          hm=hm+dph2(i)*rw(i)
+          hlm=hlm-dph1(i)*z2(i)
+        enddo
+        hll=-q1
+        hmm=-q2
       endif
 c entropy terms
       if (al.gt.0.) then
@@ -1405,13 +1182,15 @@ c entropy terms
       qlm=hlm+al*slm
       qm=hm+al*sm
       qmm=hmm+al*smm
-c calculate lambda and mu
+c Robust two-direction Newton proposal; the caller applies line search.
       dd=qmm*qll-qlm**2
-      dr=abs(dd)/(qll**2+qmm**2)
-c if det of 2X2 system too small, use only mu
-      if (dr.lt.1e-3) then
-        fla=0
-        fmu=-qm/qmm
+      denom=qll**2+qmm**2
+      fla=0.d0
+      fmu=1.d0
+      if (denom.le.tiny(1.d0)) return
+      dr=abs(dd)/denom
+      if (dr.lt.1.d-8.or.dd.le.0.d0.or.qll.ge.0.d0) then
+        if (qmm.lt.-tiny(1.d0)) fmu=-qm/qmm
       else
         fmu=(qlm*ql-qll*qm)/dd
         fla=(qlm*qm-qmm*ql)/dd
@@ -1420,40 +1199,12 @@ c if det of 2X2 system too small, use only mu
       end
 
       function rrms(f1,eb,iw,f0,n)
-c rms of difference between f1 and f0 (iw=0) or
-c rms distance between f1 and f0 normalized by the error bars eb (iw=1)
+      use dop_science
       implicit real*8 (a-h,o-z)
-      dimension f1(*),eb(*),f0(*)
-      s=0
-      if (iw.eq.0) then
-        do i=1,n
-          s=s+(f1(i)-f0(i))**2
-        enddo
-      else
-        do i=1,n
-          s=s+((f1(i)-f0(i))/eb(i))**2
-        enddo
-      endif
-      rrms=sqrt(s/(n-1))
-      return
-      end
-
-      function rmsn(x,y)
-      implicit real*8 (a-h,o-z)
-      dimension x(*),y(*)
-      common/folds/nph,nvp
-      s=0
-      do i=2,nph-1
-        do j=2,nvp-1
-          i1=i+(j-2)*nph
-          i2=i1+nph
-          i3=i2+nph
-          s0=x(i1-1)+x(i1)+x(i1+1)+x(i2-1)+x(i2+1)+x(i3-1)+x(i3)+x(i3+1)
-          s1=y(i1-1)+y(i1)+y(i1+1)+y(i2-1)+y(i2+1)+y(i3-1)+y(i3)+y(i3+1)
-          s=s+((s1-s0)/8-(y(i2)-x(i2)))**2
-        enddo
+      dimension f1(*),eb(*),f0(*),res(n),weighted(n)
+      do i=1,n
+        res(i)=f1(i)-f0(i)
       enddo
-      s=s/(nph-2)/(nvp-2)
-      rmsn=sqrt(s)
-      return
+      call apply_precision(res,weighted,q)
+      rrms=sqrt(max(q,0.d0)/statistic_rank)
       end

@@ -12,7 +12,7 @@ def _make_synthetic_doppler(tmp_path: Path, nspec: int = 6):
     center = 6550.0
     profile = np.exp(-0.5 * ((wave - center) / 3.0) ** 2)
     rng = np.random.default_rng(123)
-    flux = [10.0 + profile * (1.0 + 0.1 * rng.normal(size=wave.size)) for _ in range(nspec)]
+    flux = [10.0 + profile + 0.1 * rng.normal(size=wave.size) for _ in range(nspec)]
 
     dop.wave = [wave]
     dop.flux = flux

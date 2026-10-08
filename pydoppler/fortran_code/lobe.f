@@ -2,13 +2,12 @@
 c aux program for idl plots of dopmaps
 c calculates Roche lobes and integrates path of stream from L1
       parameter(nmax=10000)
-      complex z,w,z1,z2,dz,dw,wk,no,wr,wc,w0,wm1,wi,
+      complex z,w,z1,z2,dz,dw,wk,no,wr,wc,w0,wm1,wi,zp,wp,
      *       wout(nmax),wkout(nmax)
       dimension xout(nmax),yout(nmax),rout(nmax)
       open(3,file='lobe.out')
       open(4,file='lobe.in')
       read(4,*)qm
-      if (abs(qm-1).lt.1e-4) qm=1e-4
       close(4)
       rd=0.1
       if (qm.le.0.) then 
@@ -161,21 +160,26 @@ c change by Guillaume : - sign in Coriolis
       end
     
       function rlq1(q)
-c radius (from primary) of L1
-      if (abs(1-q).lt.1e-4) then
-        rlq=0.5
+      real lo,hi
+c primary-to-L1 distance, bracketed strictly between the stellar centers
+      if (q.le.0.) stop 'q must be positive in rlq1'
+      if (q.eq.1.) then
+        rlq1=0.5
         return
       endif
-      rl=0
-      rn=1-q
- 2    if (abs(rl/rn-1).gt.1e-4)then
-        rl=rn
-        f=q/(1-rl)**2-1/rl**2+(1+q)*rl-q
-        fa=2*q/(1-rl)**3+2/rl**3+(1+q)
-        rn=rl-f/fa
-        goto 2
-      endif
-      rlq1=rn
+      lo=0.
+      hi=1.
+      do i=1,40
+        r=(lo+hi)/2.
+        if (r.eq.lo.or.r.eq.hi) goto 3
+        f=q/(1-r)**2-1/r**2+(1+q)*r-q
+        if (f.lt.0.) then
+          lo=r
+        else
+          hi=r
+        endif
+      enddo
+ 3    rlq1=(lo+hi)/2.
       return
       end
 

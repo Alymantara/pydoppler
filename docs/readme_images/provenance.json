@@ -1,0 +1,23 @@
+{
+  "generator": "sample_script.py:main() with SAVE_PDFS=False and Agg backend",
+  "plotting": "Rasterized spectral meshes; vector axes and labels; unchanged sample parameters; SVG trailing whitespace normalized without changing rendering",
+  "run_output_sha256": "0b7652b2f355ca93312e10e23cabd5b91211313206d4ab18674a1736c2b5854f",
+  "sources": {
+    "sample_script.py": "b51beaa8599ba453c090b76abab899f39352fbeb94a0c2087445b6282b2e0053",
+    "pydoppler/pydoppler.py": "6366cc6b469ac009fcb700f460037117d81e1c4f57cae8dc191522ebc26fb1fd",
+    "pydoppler/preprocessing.py": "272436cc818b2ec74346c24bc63bc79abce3dc6f6db90830d917be4efc1e3c54",
+    "pydoppler/runtime.py": "f8fff12f062ed74ffbeac781bee6b47bb2832f1759a237475cc53bc40c8d141e",
+    "pydoppler/fortran_code/dop.f": "a373579a6e74e41175a22aa8e9e64187073ef451e1cd4c252d154838f4d4e824"
+  },
+  "outputs": {
+    "docs/readme_images/Trail.svg": "1333ba57b222752bc7a6cafbbe6819eefd325d430b99973cbc4821325ec064a7",
+    "output_images/Trail.pdf": "ed4d61202a98b529f747ad74f1dfec7e13c21695dadd1385a901246911bf66a3",
+    "pydoppler/test_data/output_images/Trail.pdf": "ed4d61202a98b529f747ad74f1dfec7e13c21695dadd1385a901246911bf66a3",
+    "docs/readme_images/Doppler_Map.svg": "af5ca5c998e3c21b355726ae0648e238ec5cdeb3def105ba7e2e34a57e047271",
+    "output_images/Doppler_Map.pdf": "ed40463acf40c17e4de6f2520ff7b47d384c6e45e4197cd81bc0f182a2627dcc",
+    "pydoppler/test_data/output_images/Doppler_Map.pdf": "ed40463acf40c17e4de6f2520ff7b47d384c6e45e4197cd81bc0f182a2627dcc",
+    "docs/readme_images/Reconstruction.svg": "15208d460ff113941ca8ac0f7813b4967428f32b475b4c5486bed66cefc585cf",
+    "output_images/Reconstruction.pdf": "039345f647d7c5c6d2a08f90a87e01dcab530612047e12a481437e50a6b3ca4f",
+    "pydoppler/test_data/output_images/Reconstruction.pdf": "039345f647d7c5c6d2a08f90a87e01dcab530612047e12a481437e50a6b3ca4f"
+  }
+}

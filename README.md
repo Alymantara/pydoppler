@@ -1,16 +1,21 @@
 # PyDoppler
 
-  This is the repository for a python wrapper for Henk Spruit's doppler tomography software.
-  This code can produce a trail spectra of a dataset, and perform
-  Doppler tomography maps. It is intended to be a light-weight code for
-  single emission line datasets.
+  This is a Python interface to Henk Spruit's classical maximum-entropy Doppler tomography software.
+  It produces trailed spectra and Doppler tomograms for single emission-line
+  datasets.
   The code will be able to:
   - [x] Load and normalise spectra
   - [x] Plot a trail spectra at initial phase resolution and binned
   - [x] Run Doppler tomography and plot reconstructed spectra
   - [ ] Perform initial spectra binning into user-defined phase bins
   - [ ] User-friendly functions
-  - [ ] Auto-save figures.
+  - [x] Save example figures as PDFs.
+
+  Scientific conventions, noise models, changed defaults, and validation are described in
+  [the scientific guide](docs/scientific_conventions.md). Existing working directories
+  must receive the updated solver: `pydoppler.copy_fortran_code(workdir, overwrite=True)`.
+  Input spectra are preserved; this replaces the bundled solver sources and
+  default configuration files in that directory.
 
   The original code and IDL interface can be found at:
    *  https://wwwmpa.mpa-garching.mpg.de/~henk/
@@ -31,7 +36,7 @@
   At the moment, only gfortran is supported.
 
 
-  Python >=3.8 is required. The package is tested through Python 3.14; the
+  Python >=3.8 is required. CI covers Python 3.8 through 3.14; the
   Fortran-backed tomography workflow also requires ``make`` and ``gfortran``.
 
   You can download and install PyDoppler via pip. In a terminal command line, just type:
@@ -88,8 +93,11 @@
 
   When ``interactive`` is disabled, the continuum bands are determined automatically so the
   normalisation step can run in headless or automated environments. Informational output is
-  routed through Python's :mod:`logging` module; configure it to surface diagnostics that were
-  previously printed to stdout.
+  routed through Python's `logging` module. Set `dop.verbose=False` to disable
+  additional console output. Every inversion executes the solver; compilation is
+  cached by source and executable content hashes. `dopin.json` records
+  preprocessing choices and source-array hashes; `run.json` records matched
+  provenance and `dop.status` records optimizer convergence and the fit statistic.
 
   ### Scope and physical conventions
 
@@ -100,7 +108,8 @@
 
   * the emitting pattern is fixed in the binary co-rotating frame during the
     observations;
-  * velocities are interpreted in the orbital plane of the binary;
+  * velocities are projected in-plane components (including sin(inclination));
+  * phase zero is the donor's inferior conjunction for the standard binary overlays;
   * the ephemeris, systemic velocity, and line rest wavelength are supplied by
     the user and dominate the physical interpretation;
   * continuum subtraction and line-window selection are part of the scientific
@@ -111,7 +120,20 @@
   the wavelength grid before the velocity-space input file is written. The
   Python plotting API reports velocities in km/s, while the Fortran input file
   uses cm/s internally. Orbital phases are in cycles, and an optional third
-  column in the phase file can supply each exposure width in phase units.
+  column in the phase file can supply each full exposure width in phase units.
+  Phases refer to mid-exposure. The convention is
+  `v_rest = -Vx*cos(2*pi*phase) + Vy*sin(2*pi*phase)`; in the usual
+  nonrelativistic approximation `v_rad = gamma + v_rest`.
+  Input spectra, systemic velocity, and rest wavelength must use consistent
+  barycentric/heliocentric and air/vacuum conventions; PyDoppler does not apply
+  those calibrations. The wavelength conversion uses the relativistic longitudinal
+  Doppler formula, which differs from the optical `v=c*z` convention.
+
+  No phases are excluded and no phase-dependent flux normalization is applied
+  by default. Select eclipse exclusions deliberately with `pb0,pb1`.
+  `instrument_sigma` specifies Gaussian instrumental broadening in km/s; its
+  default is zero. Finite exposures are integrated by phase quadrature.
+  `delw` is a wavelength **half-width**, so the fitted window spans `lam0 ± delw`.
 
   This is not a full state-of-the-art tomography framework. It does not perform
   modulation tomography, 3D tomography, multi-line joint modelling, Bayesian
@@ -136,7 +158,9 @@
   This will create a subdirectory (called ugem99) in your current working directory
   which will contain text files for each spectra (txhugem40*). The format of
   each spectrum file is two columns: _Wavelength_ and _Flux_ (an optional third
-  column can provide 1σ flux uncertainties).
+  column can provide 1σ flux uncertainties). Flux values are samples of spectral
+  density in arbitrary consistent units, not integrated pixel counts. Convert
+  pixel-integrated measurements to a density before using this interpolation pipeline.
   * Wavelength is assumed to be in Angstrom.
   * Don't use headers in the files or us a _#_ at the start of the line, so it
   will be ignored.
@@ -199,8 +223,8 @@
   dop.list = 'ugem0all.fas'		# Name of the input file
   dop.lam0 = 6562.8 # Wavelength zero in units of the original spectra
   dop.delta_phase = 0.003  # Exposure time in terms of orbital phase
-  dop.delw = 35	# size of Doppler map in wavelength centred at lam0
-  dop.overs = 0.3 # between 0-1, Undersampling of the spectra. 1= Full resolution
+  dop.delw = 35	# wavelength half-width about lam0, in Angstrom
+  dop.overs = 0.3 # map pixels per axis relative to spectral-channel count; (0,1]
   dop.gama = 36.0  # Systemic velocity in km /s
   dop.nbins = 28  # phase bins for diagnostic trail plots (tomography uses all spectra)
   ```
@@ -244,8 +268,10 @@
 ```
 
   ### Section 3.2: Normalise the data and set Doppler files
-  You will need to define a continuum band (one at each side of the emission line)
-  to fit and later subtract the continuum. The normalised spectra are written to
+  Define two continuum bands in the **observed wavelength frame**, one on each
+  side of the line. The polynomial continuum is subtracted; flux is not divided
+  by the continuum. Automatic bands use the outer 5% of the available coverage
+  and must be checked for other lines or instrumental artifacts. The normalised spectra are written to
   ``dopin`` inside ``dop.workdir``.
 
   If your phase file includes a third column with per-spectrum exposure widths
@@ -270,7 +296,22 @@
   ```
 
   The main outputs are written into ``dop.workdir``:
-  ``dop.log`` (iteration log) and ``dop.out`` (tomogram + reconstructions).
+  ``dop.log`` (iteration log), ``dop.out`` (tomogram + reconstructions),
+  ``dop.status`` (convergence/statistic), and ``run.json`` (input/output hashes).
+  Failed runs raise an exception and cannot be plotted as successful results.
+  ``clim`` is an RMS target, **not reduced chi-square**. With `iw=0`, it is
+  relative RMS and carries no noise-based significance. With supplied errors, it
+  is the RMS standardized residual, using covariance rank as the denominator.
+
+  To use measured errors and their propagated covariance, set `dop.iw=1` **before**
+  calling `Dopin()`. The weighted solver uses a Gaussian likelihood and full
+  covariance by default. `dop.covariance_mode="diagonal"` explicitly requests the
+  independence approximation. If no errors are supplied, `Dopin` estimates a
+  per-spectrum constant noise level from continuum residuals; a noiseless or
+  underdetermined continuum raises rather than inventing errors.
+  `estimate_errors=False` requires valid supplied errors. A target near one is
+  meaningful only under an adequate noise and physical model; inspect residuals
+  and sensitivity to continuum windows and regularization.
   ### Section 3.4: Plot the tomography map
   This routine will display the outcome of the Doppler tomography. You can overplot
   contours and streams.
@@ -280,7 +321,7 @@
   					smooth=False,remove_mean=False)
   # Overplot the donor contours, keplerian and ballistic streams
   qm=0.35   # mass ratio M_2 / M_1
-  k1 = 107  # Semi amplitude of the primary in km/s
+  k1 = 107  # Projected primary semi-amplitude in km/s; sets overlay scale
   inc=70    # inclination angle, in degrees
   m1=1.2    # Mass of the primary in solar masses
   porb=0.1769061911  # orbital period in days
@@ -299,9 +340,12 @@
 
   ```python
   # plot trail spectra
-  cb2,cb3,dmr,dm = dop.Reco(colorbar=True,limits=[.05,0.95],cmaps=plt.cm.magma)
+  cb2,cb3,dmr,dm = dop.Reco(colorbar=True,limits=None,cmaps=plt.cm.magma)
   ```
-  where the output variables cb2 and cb3 hold the colorbar objects (if selected); dmr and dm hold the data cubes for the reconstructed trail spectra and the binned data, respectively.
+  `cb2` and `cb3` hold colorbar objects (or `None`). `dmr` and `dm` contain
+  the reconstructed and input spectra at the original phases, with shape
+  `(n_velocity, n_spectra)`. Only the displayed trails are phase-binned. Data
+  and model share one display scale, with phases increasing upwards.
   <p align="middle">
      <img src="docs/readme_images/Reconstruction.svg" alt="Input and reconstructed trailed spectra" width="720" />
   </p>
@@ -310,29 +354,39 @@
   Residual arrays can be computed without generating an extra figure.
 
   ```python
-  residuals, norm_residuals = dop.Residuals(dm=dm, dmr=dmr, plot=False)
+  residuals, norm_residuals = dop.Residuals(dm=dm, dmr=dmr)
+  # For a weighted run with full prepared covariance:
+  # residuals, whitened = dop.Residuals(whiten=True)
   ```
+
+  `norm_residuals` is `None` when no actual errors are available. No Poisson
+  error is inferred from calibrated or continuum-subtracted flux. Excluded
+  phases are masked in residual diagnostics.
 
   ## Section 4: Extra commands
   There are many other commands that will interact with the Doppler tomogram. As
   usual, you can update them inside the pydoppler.spruit object as we did in
   section 3. The configurable parameters are:
   ```python3
-  dop.ih = 0            # 0=log-likelihood, 1=rms/least-squares (chi^2-like)
-  dop.iw = 0            # 1=read error bars from `dopin` (if provided)
-  dop.pb0 = 0.95        # range of phases to be ignored, between 0 and 1
-  dop.pb1 = 1.05        # range of phases to be ignored, between 1 and 2
-  dop.ns = 7            # smearing width in default map
-  dop.ac = 8e-4         # accuracy of convergence
-  dop.nim = 150         # max no of iterations
-  dop.al0 = 0.002       # starting value of alfa
-  dop.alf = 1.7         # factor
-  dop.nal = 0           # max number of alfas
-  dop.clim = 1.6        # 'C-aim'
+  dop.ih = 0            # legacy positive log objective; 1=unweighted least squares
+  dop.iw = 0            # 1=Gaussian fit using provided/estimated noise; 0=unweighted
+  dop.pb0 = 0.0         # open exclusion interval, repeated every orbit
+  dop.pb1 = 0.0         # equal bounds exclude nothing; .95,1.05 would exclude eclipse
+  dop.ns = 7            # default-map Gaussian kernel exp(-r^2/ns^2), in pixels
+  dop.ac = 8e-4         # optimizer stationarity tolerance
+  dop.nim = 1000        # max iterations per regularization value
+  dop.al0 = 0.002       # starting entropy weight alpha
+  dop.alf = 1.7         # divide alpha by this factor for each subsequent attempt
+  dop.nal = 0           # number of alpha values to try; 0 means just al0
+  dop.clim = 1.6        # RMS target: relative flux (iw=0) or standardized noise (iw>=1)
   dop.ipri = 2          # printout control for standard output channel (ipr=2 for full)
-  dop.norm = 1          # norm=1 for normalization to flat light curve
-  dop.wid = 10e5        # width of central absorption fudge
-  dop.af = 0.0          # amplitude of central absorption fudge
+  dop.norm = 0          # preserve observed phase-dependent flux (recommended)
+  dop.wid = 10e5        # velocity scale in cm/s of empirical absorption prescription
+  dop.af = 0.0          # empirical absorption amplitude; zero disables it
+  dop.instrument_sigma = 0.0  # Gaussian LSF sigma in km/s (not FWHM)
+  dop.phase_subsamples = 0    # adaptive quadrature; positive value sets minimum samples
+  dop.covariance_mode = "full"
+  dop.map_size = None    # optional explicit even map size; otherwise derived from overs
   ```
 
   ## Section 5: Troubleshoot

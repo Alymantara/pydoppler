@@ -22,11 +22,17 @@
 #-fno-globals
 
 FC = gfortran
-FFLAGS = -O -w
-GFORTRAN_MAJOR := $(shell $(FC) -dumpversion 2>/dev/null | sed 's/\..*//')
-ALLOW_ARGUMENT_MISMATCH ?= $(shell if [ "$(GFORTRAN_MAJOR)" -ge 10 ] 2>/dev/null; then echo -fallow-argument-mismatch; fi)
+FFLAGS = -O2 -ffixed-line-length-none
+DEBUG_FFLAGS = -O0 -g -fcheck=all -fbacktrace -ffixed-line-length-none
 
-compile=cp -f cclock.f clock.f ; $(FC) $(FFLAGS) $(ALLOW_ARGUMENT_MISMATCH)
+compile=cp -f cclock.f clock.f ; $(FC) $(FFLAGS)
+
+.PHONY: run debug
+run: dopp
+	./dopp
+
+debug:
+	$(FC) $(DEBUG_FFLAGS) -o dopp dop.f cclock.f
 
 dop.out: dopin dop.in dopp
 	./dopp

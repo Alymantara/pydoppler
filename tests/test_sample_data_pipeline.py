@@ -44,12 +44,12 @@ def _write_mock_dopout(
     if vp is None:
         vp = np.array([1.0e5, 2.0e5, 3.0e5], dtype=float)
     vp = np.asarray(vp, dtype=float)
-    params = f"0 0 0.0 1.0 7 1e-4 1.0 1.0 1 1.0 0.0 {nv} 0.0 0"
+    params = f"0 0 0.0 1.0 7 1e-4 1.0 1.0 1 1.0 0.0 {nv} {np.max(np.abs(vp))} dopmap"
 
     payload = " ".join(
         [
             *(f"{value:.8e}" for value in pha),
-            "0",
+            "1",
             *(f"{value:.8e}" for value in dpha),
             *(f"{value:.8e}" for value in vp),
             *(f"{value:.8e}" for value in np.asarray(dm, dtype=float).ravel()),
@@ -131,10 +131,11 @@ def test_dopmap_handles_flat_zero_map(tmp_path: Path):
     _, data = dop.Dopmap(plot=False)
 
     assert data.shape == (4, 4)
-    assert np.allclose(data, 0.0)
+    assert np.allclose(data[np.isfinite(data)], 0.0)
+    assert np.isnan(data[0, 0])
 
 
-def test_dopmap_plot_extent_uses_half_velocity_bin_width(tmp_path: Path):
+def test_dopmap_plot_extent_uses_map_grid_not_spectral_grid(tmp_path: Path):
     import matplotlib
 
     matplotlib.use("Agg", force=True)
@@ -152,7 +153,7 @@ def test_dopmap_plot_extent_uses_half_velocity_bin_width(tmp_path: Path):
 
     extent = plt.gca().images[0].get_extent()
 
-    assert extent == pytest.approx([-2.0, 7.0, -2.0, 7.0])
+    assert extent == pytest.approx([-28 / 3, 28 / 3, -28 / 3, 28 / 3])
     assert plt.gca().images[0].get_cmap().name == "magma"
     plt.close("all")
 
