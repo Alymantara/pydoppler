@@ -36,7 +36,7 @@
   At the moment, only gfortran is supported.
 
 
-  Python >=3.8 is required. CI covers Python 3.8 through 3.14; the
+  Python >=3.8 is required. CI covers Python 3.8 through 3.15; the
   Fortran-backed tomography workflow also requires ``make`` and ``gfortran``.
 
   You can download and install PyDoppler via pip. In a terminal command line, just type:
