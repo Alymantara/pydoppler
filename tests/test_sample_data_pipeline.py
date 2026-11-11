@@ -115,12 +115,54 @@ def test_bundled_dataset_runs_full_pipeline_headless(tmp_path: Path):
 
     dop.Foldspec()
     dop.Dopin(plot=False, continuum_band=[6500, 6537, 6591, 6620])
-    dop.Syncdop()
+    diagnostics = dop.Syncdop()
     _, dopmap = dop.Dopmap(plot=False)
 
     assert (workdir / "dop.out").is_file()
     assert dopmap.ndim == 2
     assert np.any(np.isfinite(dopmap))
+
+    # Regression for the positivity failure: negative noise samples must not
+    # lift the baseline, so the map stays (nearly) nonnegative, smooth, and
+    # peaks in the disc rather than at the rim of the velocity grid.
+    assert diagnostics["baseline_raised"] == 0
+    assert diagnostics["alpha"] == pytest.approx(0.002)
+    raw = pydoppler_module._parse_dopout(workdir / "dop.out")
+    vx, vy = np.meshgrid(raw.vmap, raw.vmap)
+    radius = np.hypot(vx, vy)
+    support = radius < raw.va * 1.001
+    peak = raw.im[support].max()
+    assert raw.im[support].min() > -0.05 * peak
+    assert radius.flat[np.argmax(np.where(support, raw.im, -np.inf))] < 0.8 * raw.va
+    assert np.nanmax(dopmap) == pytest.approx(1.0)  # display is a fraction of the peak
+
+    # The legacy log objective must raise its baseline here, and say so.
+    dop.ih = 0
+    with caplog_warning(dop) as messages:
+        legacy = dop.Syncdop()
+    assert legacy["baseline_raised"] == 1
+    assert any("raised the baseline" in message for message in messages)
+
+
+class caplog_warning:
+    """Collect the wrapper's warning messages without depending on pytest's caplog."""
+
+    def __init__(self, dop):
+        self.dop = dop
+        self.messages = []
+
+    def __enter__(self):
+        import logging
+
+        self.handler = logging.Handler(level=logging.WARNING)
+        self.handler.emit = lambda record: self.messages.append(record.getMessage())
+        self.dop.logger.addHandler(self.handler)
+        self.dop.logger.setLevel(logging.WARNING)
+        return self.messages
+
+    def __exit__(self, *exc):
+        self.dop.logger.removeHandler(self.handler)
+        return False
 
 
 def test_dopmap_handles_flat_zero_map(tmp_path: Path):

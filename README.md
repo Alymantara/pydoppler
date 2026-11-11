@@ -1,395 +1,359 @@
 # PyDoppler
 
-  This is a Python interface to Henk Spruit's classical maximum-entropy Doppler tomography software.
-  It produces trailed spectra and Doppler tomograms for single emission-line
-  datasets.
-  The code will be able to:
-  - [x] Load and normalise spectra
-  - [x] Plot a trail spectra at initial phase resolution and binned
-  - [x] Run Doppler tomography and plot reconstructed spectra
-  - [ ] Perform initial spectra binning into user-defined phase bins
-  - [ ] User-friendly functions
-  - [x] Save example figures as PDFs.
+PyDoppler is a Python interface to Henk Spruit's floating-default
+maximum-entropy Doppler tomography. It turns phase-resolved spectra of a
+single emission line into trailed spectra, a Doppler tomogram and a
+reconstructed trail, with input validation, noise propagation and run
+provenance.
 
-  Scientific conventions, noise models, changed defaults, and validation are described in
-  [the scientific guide](docs/scientific_conventions.md). Existing working directories
-  must receive the updated solver: `pydoppler.copy_fortran_code(workdir, overwrite=True)`.
-  Input spectra are preserved; this replaces the bundled solver sources and
-  default configuration files in that directory.
+The Fortran solver descends from Spruit's 1999 code and has since been
+revised:
 
-  The original code and IDL interface can be found at:
-   *  https://wwwmpa.mpa-garching.mpg.de/~henk/
+- **Forward model:** an exact square-pixel projection, with exposure smearing and an optional Gaussian line-spread function.
+- **Likelihoods:** Gaussian likelihoods with diagonal or full noise covariance.
+- **Regularization:** an alpha schedule that brackets the RMS target and refines it by bisection.
+- **Storage:** arrays are allocated at run time, so one executable serves every problem size.
 
-  At the moment, there are many features that haven't been implemented. However, the code will be updated
-  continuously. If you have any queries/comments/bug reports please send an e-mail to:
-   * jvhs1 (at) st-andrews.ac.uk
+<p align="middle">
+   <img src="https://raw.githubusercontent.com/fcotizelati/pydoppler/master/docs/readme_images/Doppler_Map.svg" alt="Doppler tomogram of U Gem with Roche-lobe and stream overlays" width="520" />
+</p>
 
-  ## Acknowledgment
-  
-  If you make use of this software, please acknowledge the original code and this repository with the following citations:
-   * Spruit 1998, arXiv, astro-ph/9806141 (https://ui.adsabs.harvard.edu/abs/1998astro.ph..6141S/abstract)
-   * Hernandez Santisteban, 2021, ASCL, 6003 (https://ui.adsabs.harvard.edu/abs/2021ascl.soft06003H/abstract)
+## Contents
 
-  ## Requirements & Installation
+1. [Installation](#installation)
+2. [Quick start](#quick-start)
+3. [Input data](#input-data)
+4. [Tutorial: U Gem](#tutorial-u-gem)
+5. [Noise-weighted fits and regularization](#noise-weighted-fits-and-regularization)
+6. [Parameters](#parameters)
+7. [Conventions in brief](#conventions-in-brief)
+8. [Outputs and reproducibility](#outputs-and-reproducibility)
+9. [Scope and limitations](#scope-and-limitations)
+10. [Citation](#citation)
 
-  The doppler tomography code is written in fortran. Please ensure that you have a fortran compiler installed.
-  At the moment, only gfortran is supported.
+## Installation
 
+Requirements:
 
-  Python >=3.8 is required. CI covers Python 3.8 through 3.15; the
-  Fortran-backed tomography workflow also requires ``make`` and ``gfortran``.
+- Python 3.9 or newer.
+- NumPy and Matplotlib.
+- `make` and `gfortran`, which compile the solver on first use. On macOS use `brew install gcc`; on Debian or Ubuntu use `apt install gfortran`.
 
-  You can download and install PyDoppler via pip. In a terminal command line, just type:
+Install this version from GitHub:
 
-  ```
-  pip install pydoppler
-  ```
-
-  If you need to upgrade the package to the latest version, you can do this with
-  ```
-  pip install --upgrade pydoppler
-  ```
-
-  ##  Section 1:  Usage
-
-  You can use the ``sample_script.py`` file to run all the relevant commands
-  _shown in sections 2 and 3_ from a terminal command line as:
-  ```
-  python sample_script.py
-  ```
-  or in a python console:
-  ```python
-  run sample_script.py
-  ```
-  This will read all the files, normalise the spectra, perform Doppler
-  tomography and output the results. In the following sections, I will briefly
-  explain each main routine.
-
-  ### Quick start for automated workflows
-
-  The package bundles helper utilities that simplify scripting and CI usage. For example:
-
-  ```python
-  from pathlib import Path
-
-  import matplotlib.pyplot as plt
-  import pydoppler
-
-  # Keep Fortran build products + outputs isolated
-  workdir = Path.cwd() / "pydoppler-workdir"
-  pydoppler.copy_fortran_code(workdir)
-  pydoppler.copy_test_data(workdir)
-
-  dop = pydoppler.spruit(workdir=workdir, interactive=False)
-  dop.delw = 35
-  dop.overs = 0.3
-  dop.base_dir = workdir / "ugem99"
-  dop.list = "ugem0all.fas"
-  dop.Foldspec()
-  dop.Dopin(plot=False)  # continuum bands are estimated automatically
-  dop.Syncdop()
-  _, dopmap = dop.Dopmap(plot=False)
-  ```
-
-  When ``interactive`` is disabled, the continuum bands are determined automatically so the
-  normalisation step can run in headless or automated environments. Informational output is
-  routed through Python's `logging` module. Set `dop.verbose=False` to disable
-  additional console output. Every inversion executes the solver; compilation is
-  cached by source and executable content hashes. `dopin.json` records
-  preprocessing choices and source-array hashes; `run.json` records matched
-  provenance and `dop.status` records optimizer convergence and the fit statistic.
-
-  ### Scope and physical conventions
-
-  PyDoppler is a lightweight wrapper around Spruit's classic two-dimensional
-  maximum-entropy Doppler tomography code. It is appropriate for single-line,
-  phase-resolved spectroscopy when the usual assumptions of classical Doppler
-  tomography are adequate:
-
-  * the emitting pattern is fixed in the binary co-rotating frame during the
-    observations;
-  * velocities are projected in-plane components (including sin(inclination));
-  * phase zero is the donor's inferior conjunction for the standard binary overlays;
-  * the ephemeris, systemic velocity, and line rest wavelength are supplied by
-    the user and dominate the physical interpretation;
-  * continuum subtraction and line-window selection are part of the scientific
-    model, not just plotting choices.
-
-  Input wavelengths are assumed to be in Angstrom. ``dop.gama`` is the systemic
-  velocity in km/s; positive values are treated as a redshift and removed from
-  the wavelength grid before the velocity-space input file is written. The
-  Python plotting API reports velocities in km/s, while the Fortran input file
-  uses cm/s internally. Orbital phases are in cycles, and an optional third
-  column in the phase file can supply each full exposure width in phase units.
-  Phases refer to mid-exposure. The convention is
-  `v_rest = -Vx*cos(2*pi*phase) + Vy*sin(2*pi*phase)`; in the usual
-  nonrelativistic approximation `v_rad = gamma + v_rest`.
-  Input spectra, systemic velocity, and rest wavelength must use consistent
-  barycentric/heliocentric and air/vacuum conventions; PyDoppler does not apply
-  those calibrations. The wavelength conversion uses the relativistic longitudinal
-  Doppler formula, which differs from the optical `v=c*z` convention.
-
-  No phases are excluded and no phase-dependent flux normalization is applied
-  by default. Select eclipse exclusions deliberately with `pb0,pb1`.
-  `instrument_sigma` specifies Gaussian instrumental broadening in km/s; its
-  default is zero. Finite exposures are integrated by phase quadrature.
-  `delw` is a wavelength **half-width**, so the fitted window spans `lam0 ± delw`.
-
-  This is not a full state-of-the-art tomography framework. It does not perform
-  modulation tomography, 3D tomography, multi-line joint modelling, Bayesian
-  uncertainty propagation, or automated ephemeris/system-parameter inference.
-  Use residuals, reconstructed trails, phase coverage, and simulations to check
-  whether a map feature is demanded by the data.
-
-  ##  Section 2: How to load data
-
-  ###  Section 2.1: Test case - the accreting white dwarf - U Gem
-
-  You can start to test PyDoppler with a test dataset kindly provided by J. Echevarria and published
-  in Echevarria et al. 2007, AJ, 134, 262 (https://ui.adsabs.harvard.edu/abs/2007AJ....134..262E/abstract).
-  To copy the data to your working directory, open a (i)python console and run the
-  following commands:
-  ```python
-  import pydoppler
-
-  pydoppler.test_data()
-
-  ```
-  This will create a subdirectory (called ugem99) in your current working directory
-  which will contain text files for each spectra (txhugem40*). The format of
-  each spectrum file is two columns: _Wavelength_ and _Flux_ (an optional third
-  column can provide 1σ flux uncertainties). Flux values are samples of spectral
-  density in arbitrary consistent units, not integrated pixel counts. Convert
-  pixel-integrated measurements to a density before using this interpolation pipeline.
-  * Wavelength is assumed to be in Angstrom.
-  * Don't use headers in the files or us a _#_ at the start of the line, so it
-  will be ignored.
-
-  In addition, a phase file (ugem0all.fas) will be added inside the ugem99
-  directory which contains the name
-  of each spectrum file and its corresponding orbital phase.
-  This is a two- or three-column file with the following format:
-```
-  txhugem4004 0.7150
-  txhugem4005 0.7794
-         .
-         .
-         .
+```bash
+pip install "git+https://github.com/fcotizelati/pydoppler"
 ```
 
-  ###  Section 2.2: Load your data
-  I recommend to stick to the previous file format (as in the test dataset):
+`pip install pydoppler` installs the release on PyPI, which may predate the
+solver and conventions described here.
 
-  * Individual spectra. Two- or three-column files, _space separated_: Wavelength  Flux  [Flux_Error]
-  * Phase file. Two- or three-column file, _space separated_: Spectrum_name  Orbital_Phase  [Delta_Phase]
+## Quick start
 
-  and the following directory tree in order for PyDoppler to work properly:
+```python
+from pathlib import Path
 
-  ```
-  wrk_dir
-  ├── data_dir (your target)
-  │   │
-  │   ├── individual_spectra (N spectra)
-  │   │
-  │   └── phases_file
-  │
-  └── fortran_code_files
-  ```
+import pydoppler
 
-  ##  Section 3:  Doppler tomography tutorial
-  Before running any routines, verify that you have added all the relevant
-  parameters into the PyDoppler object.
+workdir = Path.cwd() / "pydoppler-workdir"   # solver build and all outputs
+pydoppler.copy_fortran_code(workdir)
+pydoppler.copy_test_data(workdir)             # bundled U Gem spectra
 
-  * _NOTE:_ PyDoppler runs the Fortran code inside ``dop.workdir`` (defaults to
-  ``./pydoppler-workdir``) and writes ``dopin``, ``dop.in``, ``dop.out`` and ``dop.log``
-  there. Copy the bundled Fortran sources into that directory with
-  ``pydoppler.copy_fortran_code(dop.workdir)`` (or set ``auto_install=True`` when
-  constructing the object). Use ``dop.make_run_dir()`` to create a fresh run
-  directory when running multiple maps.
+dop = pydoppler.spruit(workdir=workdir)
+dop.base_dir = workdir / "ugem99"
+dop.list = "ugem0all.fas"
+dop.lam0, dop.delw, dop.gama = 6562.8, 35, 36.0   # Angstrom, Angstrom, km/s
+dop.overs = 0.3
 
-  ```python
-  from pathlib import Path
-
-  import matplotlib.pyplot as plt
-  import pydoppler
-
-  # Load base object for tomography
-  dop = pydoppler.spruit(workdir=Path.cwd() / "pydoppler-workdir")
-  pydoppler.copy_fortran_code(dop.workdir)
-
-  # Basic data for the tomography to work
-  dop.object = 'U Gem'
-  dop.base_dir = 'ugem99' # Base directory for input spectra
-  dop.list = 'ugem0all.fas'		# Name of the input file
-  dop.lam0 = 6562.8 # Wavelength zero in units of the original spectra
-  dop.delta_phase = 0.003  # Exposure time in terms of orbital phase
-  dop.delw = 35	# wavelength half-width about lam0, in Angstrom
-  dop.overs = 0.3 # map pixels per axis relative to spectral-channel count; (0,1]
-  dop.gama = 36.0  # Systemic velocity in km /s
-  dop.nbins = 28  # phase bins for diagnostic trail plots (tomography uses all spectra)
-  ```
-
-  ### Section 3.1: Read the data
-  This routine reads in the raw data and prepares the files for further
-  processing.
-  ```python
-  # Read in the individual spectra and orbital phase information
-  dop.Foldspec()
-  ```
-  ```
-  001 txhugem4004  0.715 2048
-  002 txhugem4005  0.7794 2048
-  003 txhugem4006  0.8348 2048
-  004 txhugem4007  0.8942 2048
-  005 txhugem4008  0.9518 2048
-  006 txhugem4009  0.0072 2048
-  007 txhugem4010  0.0632 2048
-  008 txhugem4011  0.1186 2048
-  009 txhugem4012  0.1745 2048
-  010 txhugem4013  0.2344 2048
-  011 txhugem4014  0.2904 2048
-  012 txhugem4015  0.3724 2048
-  013 txhugem4016  0.4283 2048
-  014 txhugem4017  0.4866 2048
-  015 txhugem4018  0.5425 2048
-  016 txhugem4019  0.5979 2048
-  017 txhugem4020  0.6544 2048
-  018 txhugem4021  0.7098 2048
-  019 txhugem4022  0.7652 2048
-  020 txhugem4023  0.8195 2048
-  021 txhugem4024  0.8772 2048
-  022 txhugem4025  0.9269 2048
-  023 txhugem4026  0.9614 2048
-  024 txhugem4027  0.9959 2048
-  025 txhugem4028  0.0304 2048
-  026 txhugem4029  0.0648 2048
-  027 txhugem4030  0.1027 2048
-  028 txhugem4031  0.1372 2048
+dop.Foldspec()                                     # read spectra and phases
+dop.Dopin(continuum_band=[6500, 6537, 6591, 6620],
+          use_list_dpha=True, plot=False)          # continuum-subtract, write input
+dop.Syncdop()                                      # compile once, run, validate
+_, tomogram = dop.Dopmap(plot=False)               # map / peak; NaN outside support
 ```
 
-  ### Section 3.2: Normalise the data and set Doppler files
-  Define two continuum bands in the **observed wavelength frame**, one on each
-  side of the line. The polynomial continuum is subtracted; flux is not divided
-  by the continuum. Automatic bands use the outer 5% of the available coverage
-  and must be checked for other lines or instrumental artifacts. The normalised spectra are written to
-  ``dopin`` inside ``dop.workdir``.
+The complete tutorial with all figures is in `sample_script.py`. Run it with
+`python sample_script.py`, or `%run sample_script.py` in IPython. The packaged
+copy installs with `pydoppler.install_sample_script(".")`.
 
-  If your phase file includes a third column with per-spectrum exposure widths
-  in orbital phase, pass ``use_list_dpha=True`` to :meth:`Dopin` to write those
-  values into ``dopin``.
-  ```python  
-  # Normalise the spectra
-  dop.Dopin(continuum_band=[6500,6537,6591,6620],
-            plot_median=False, poly_degree=2)
-  ```
+## Input data
 
+**Spectra.** One whitespace-separated text file per spectrum, with columns
+`wavelength flux [flux_error]`. Lines starting with `#` are ignored.
 
-  <p align="middle">
-     <img src="docs/readme_images/Trail.svg" alt="Velocity profile and trailed spectra" width="430" />
-  </p>
+- Wavelengths are in Angstrom.
+- Fluxes are samples of a spectral density, not integrated pixel counts.
+- The optional third column holds 1σ errors and must be strictly positive.
 
-  ### Section 3.3: Run the Fortran code
-  Now, let's run the tomography software!
-  ```python
-  # Perform tomography
-  dop.Syncdop()
-  ```
+**Phase file.** One line per spectrum: `file_name phase [exposure_width]`.
 
-  The main outputs are written into ``dop.workdir``:
-  ``dop.log`` (iteration log), ``dop.out`` (tomogram + reconstructions),
-  ``dop.status`` (convergence/statistic), and ``run.json`` (input/output hashes).
-  Failed runs raise an exception and cannot be plotted as successful results.
-  ``clim`` is an RMS target, **not reduced chi-square**. With `iw=0`, it is
-  relative RMS and carries no noise-based significance. With supplied errors, it
-  is the RMS standardized residual, using covariance rank as the denominator.
+- Phases are orbital cycles at **mid-exposure**.
+- Exposure widths are full widths in cycles. Use them with `Dopin(use_list_dpha=True)`; otherwise the scalar `dop.delta_phase` applies to every spectrum.
 
-  To use measured errors and their propagated covariance, set `dop.iw=1` **before**
-  calling `Dopin()`. The weighted solver uses a Gaussian likelihood and full
-  covariance by default. `dop.covariance_mode="diagonal"` explicitly requests the
-  independence approximation. If no errors are supplied, `Dopin` estimates a
-  per-spectrum constant noise level from continuum residuals; a noiseless or
-  underdetermined continuum raises rather than inventing errors.
-  `estimate_errors=False` requires valid supplied errors. A target near one is
-  meaningful only under an adequate noise and physical model; inspect residuals
-  and sensitivity to continuum windows and regularization.
-  ### Section 3.4: Plot the tomography map
-  This routine will display the outcome of the Doppler tomography. You can overplot
-  contours and streams.
-  ```python
-  # Read and plot map
-  cb,data = dop.Dopmap(limits=[0.05,0.99],colorbar=True,cmaps=plt.cm.magma,
-  					smooth=False,remove_mean=False)
-  # Overplot the donor contours, keplerian and ballistic streams
-  qm=0.35   # mass ratio M_2 / M_1
-  k1 = 107  # Projected primary semi-amplitude in km/s; sets overlay scale
-  inc=70    # inclination angle, in degrees
-  m1=1.2    # Mass of the primary in solar masses
-  porb=0.1769061911  # orbital period in days
+```text
+txhugem4004  0.7150 0.03930
+txhugem4005  0.7794 0.03930
+...
+```
 
+Keep the spectra and the phase file in one directory (`dop.base_dir`). All
+solver files go to `dop.workdir`. Use `dop.make_run_dir()` to start a fresh run
+directory for each map.
 
-  pydoppler.stream(qm,k1,porb,m1,inc)
-  ```
-  <p align="middle">
-     <img src="docs/readme_images/Doppler_Map.svg" alt="Doppler tomogram" width="560" />
-  </p>
+## Tutorial: U Gem
 
-  ### Section 3.5: Spectra reconstruction
-  Always check that reconstructed spectra looks like the original one. A good
-  rule of thumb "If a feature on the Doppler tomogram is not in the trail
-  spectrum, most likely its not real!"
+The bundled data are 28 H-alpha spectra of U Gem in quiescence, kindly
+provided by J. Echevarria and published in
+[Echevarria et al. 2007, AJ, 134, 262](https://ui.adsabs.harvard.edu/abs/2007AJ....134..262E/abstract).
+Each has an effective 600 s exposure, which is 0.0393 cycles. Copy them with
+`pydoppler.test_data()` or `pydoppler.copy_test_data(path)`.
 
-  ```python
-  # plot trail spectra
-  cb2,cb3,dmr,dm = dop.Reco(colorbar=True,limits=None,cmaps=plt.cm.magma)
-  ```
-  `cb2` and `cb3` hold colorbar objects (or `None`). `dmr` and `dm` contain
-  the reconstructed and input spectra at the original phases, with shape
-  `(n_velocity, n_spectra)`. Only the displayed trails are phase-binned. Data
-  and model share one display scale, with phases increasing upwards.
-  <p align="middle">
-     <img src="docs/readme_images/Reconstruction.svg" alt="Input and reconstructed trailed spectra" width="720" />
-  </p>
+### 1. Read the spectra
 
-  ### Section 3.6: Residual diagnostics
-  Residual arrays can be computed without generating an extra figure.
+```python
+dop = pydoppler.spruit(workdir="pydoppler-workdir")
+pydoppler.copy_fortran_code(dop.workdir)
+dop.object = "U Gem"
+dop.base_dir = "ugem99"
+dop.list = "ugem0all.fas"
+dop.lam0 = 6562.8   # rest wavelength, Angstrom
+dop.delw = 35       # half-width of the rest-frame window, Angstrom
+dop.gama = 36.0     # systemic velocity, km/s
+dop.overs = 0.3     # map pixels per axis / spectral channels
+dop.nbins = 28      # phase bins for diagnostic plots only
+dop.Foldspec()
+```
 
-  ```python
-  residuals, norm_residuals = dop.Residuals(dm=dm, dmr=dmr)
-  # For a weighted run with full prepared covariance:
-  # residuals, whitened = dop.Residuals(whiten=True)
-  ```
+`Foldspec()` trims all spectra to their common wavelength range and keeps the
+native samples, so later resampling happens once.
 
-  `norm_residuals` is `None` when no actual errors are available. No Poisson
-  error is inferred from calibrated or continuum-subtracted flux. Excluded
-  phases are masked in residual diagnostics.
+### 2. Subtract the continuum
 
-  ## Section 4: Extra commands
-  There are many other commands that will interact with the Doppler tomogram. As
-  usual, you can update them inside the pydoppler.spruit object as we did in
-  section 3. The configurable parameters are:
-  ```python3
-  dop.ih = 0            # legacy positive log objective; 1=unweighted least squares
-  dop.iw = 0            # 1=Gaussian fit using provided/estimated noise; 0=unweighted
-  dop.pb0 = 0.0         # open exclusion interval, repeated every orbit
-  dop.pb1 = 0.0         # equal bounds exclude nothing; .95,1.05 would exclude eclipse
-  dop.ns = 7            # default-map Gaussian kernel exp(-r^2/ns^2), in pixels
-  dop.ac = 8e-4         # optimizer stationarity tolerance
-  dop.nim = 1000        # max iterations per regularization value
-  dop.al0 = 0.002       # starting entropy weight alpha
-  dop.alf = 1.7         # divide alpha by this factor for each subsequent attempt
-  dop.nal = 0           # number of alpha values to try; 0 means just al0
-  dop.clim = 1.6        # RMS target: relative flux (iw=0) or standardized noise (iw>=1)
-  dop.ipri = 2          # printout control for standard output channel (ipr=2 for full)
-  dop.norm = 0          # preserve observed phase-dependent flux (recommended)
-  dop.wid = 10e5        # velocity scale in cm/s of empirical absorption prescription
-  dop.af = 0.0          # empirical absorption amplitude; zero disables it
-  dop.instrument_sigma = 0.0  # Gaussian LSF sigma in km/s (not FWHM)
-  dop.phase_subsamples = 0    # adaptive quadrature; positive value sets minimum samples
-  dop.covariance_mode = "full"
-  dop.map_size = None    # optional explicit even map size; otherwise derived from overs
-  ```
+```python
+dop.Dopin(continuum_band=[6500, 6537, 6591, 6620], poly_degree=2,
+          use_list_dpha=True)
+```
 
-  ## Section 5: Troubleshoot
-  This is an early version of the wrapper. Things will go wrong. If you find a
-  bug or need a feature, I will try my best to work it out. If you think you can
-  add to this wrapper, I encourage you push new changes and contribute to it.
+`continuum_band` gives two continuum windows in the **observed** wavelength
+frame.
+
+- The fitted polynomial is subtracted from the spectrum, not divided into it.
+- The spectra are resampled onto a uniform velocity grid around `lam0 ± delw`.
+- Without `continuum_band`, the outer 5% of the coverage is used. Check that those windows are free of other lines.
+
+<p align="middle">
+   <img src="https://raw.githubusercontent.com/fcotizelati/pydoppler/master/docs/readme_images/Trail.svg" alt="Average profile and trailed spectra" width="400" />
+</p>
+
+### 3. Run the inversion
+
+```python
+diagnostics = dop.Syncdop()
+```
+
+The solver is compiled on the first call and cached by source and compiler
+hashes; every call runs the inversion. A run counts as successful only if both
+of these hold:
+
+- the optimizer converged;
+- the RMS statistic met the target `clim`.
+
+Anything else raises an exception, so failed runs can never be plotted. The
+bundled spectra have no errors, so this fit is unweighted and its statistic is
+the relative RMS residual. See
+[noise-weighted fits](#noise-weighted-fits-and-regularization) for fits with errors.
+
+### 4. Plot the tomogram
+
+```python
+import matplotlib.pyplot as plt
+
+cbar, tomogram = dop.Dopmap(colorbar=True, cmaps=plt.cm.magma)
+pydoppler.stream(q=0.35, k1=107, porb=0.1769061911, m1=1.2, inc=70)
+```
+
+How the map is displayed:
+
+- It is divided by its positive peak, so zero flux is zero on the colour bar.
+- The default colour limits are 0 and the 99.5th percentile.
+- Optional processing: `smooth`, `remove_mean` and `negative`.
+- The returned array is exactly what is displayed.
+
+`stream()` overlays the Roche lobes, the ballistic stream and the Keplerian
+velocities along it. `k1` is the projected primary semi-amplitude and sets the
+velocity scale. The masses, period and inclination are checked against it, with
+a warning if they disagree.
+
+### 5. Compare data and reconstruction
+
+```python
+cb_data, cb_model, model, data = dop.Reco(colorbar=True, cmaps=plt.cm.magma)
+```
+
+`data` and `model` have shape `(n_velocity, n_spectra)` at the original
+phases; only the plots are binned in phase. Both panels share one flux scale,
+so amplitude errors are visible. Any map feature should be traceable in the
+trailed spectra.
+
+<p align="middle">
+   <img src="https://raw.githubusercontent.com/fcotizelati/pydoppler/master/docs/readme_images/Reconstruction.svg" alt="Input and reconstructed trailed spectra" width="680" />
+</p>
+
+### 6. Residuals
+
+```python
+residuals, standardized = dop.Residuals()
+# Full-covariance fits only: residuals whitened by the propagated covariance
+residuals, whitened = dop.Residuals(whiten=True)
+```
+
+`standardized` is `None` when no measured or estimated errors exist. Spectra
+excluded by `pb0, pb1` are NaN.
+
+## Noise-weighted fits and regularization
+
+For a statistically interpretable fit, set `dop.iw = 1` **before** `Dopin()`.
+
+- **Error source:** errors come from the spectrum files' third column. Without them, a constant noise level per spectrum is estimated from the continuum-window residuals.
+- **Covariance:** interpolation and continuum subtraction correlate the prepared channels. `Dopin()` propagates their full covariance, and with the default `covariance_mode="full"` the solver fits it exactly. `covariance_mode="diagonal"` ignores the correlations, overstates the information in the data and tends to over-fit noise.
+- **Statistic:** the fit statistic is the RMS standardized residual. It is not a reduced chi-square.
+
+```python
+dop.iw = 1
+dop.Dopin(continuum_band=[6500, 6537, 6591, 6620], poly_degree=2,
+          use_list_dpha=True)
+dop.clim = 1.2          # target RMS of standardized residuals (default 1.0)
+dop.Syncdop()
+```
+
+**Choosing regularization.** The entropy weight `alpha` trades smoothness
+against fit.
+
+- With `al0=None` (default), the solver starts from the historical weight 0.002 per unit of channel information. That is exactly 0.002 in unweighted fits and the equivalent value in weighted fits.
+- Unweighted fits use that single alpha.
+- Weighted fits decrease alpha by `alf` for up to `nal` steps until the RMS statistic reaches `clim`, then bisect in log(alpha) to land within 0.5% below the target. The result is close to the most regularized map consistent with the target.
+- If the statistic levels off above `clim`, `Syncdop()` raises an error that reports the attainable floor.
+
+**When the target is out of reach.** For the U Gem data with
+continuum-estimated errors, the floor is about 1.07, so `clim=1.0` is not
+attainable. Possible reasons:
+
+- the noise estimate is somewhat low;
+- the emission may vary in ways a stationary positive map cannot describe;
+- the continuum may be misplaced.
+
+Raise `clim` only for a documented reason. Lower targets fit noise: they give
+maps with more pixel-scale structure.
+
+**Positivity.** The solver adds a flat baseline map so that a positive latent
+map can describe signed, continuum-subtracted data. In least-squares and
+Gaussian fits the baseline stays at `baseline_fraction`, 10% of the RMS flux.
+As a result, returned maps can dip only slightly below zero. The legacy log
+objective `ih=0` cannot handle negative samples. It therefore raises the
+baseline as needed, which effectively removes positivity, and `Syncdop()` logs
+a warning when that happens.
+
+## Parameters
+
+Set these attributes on the `spruit` object before `Dopin()` (data
+parameters) or `Syncdop()` (solver parameters).
+
+| Attribute | Default | Meaning |
+|---|---|---|
+| `lam0` | 6562.83 | Rest wavelength (Å), same air/vacuum convention as the data |
+| `delw` | 80 | Half-width of the rest-frame window (Å): `lam0 ± delw` |
+| `gama` | 0 | Systemic velocity (km/s); positive removes a redshift |
+| `delta_phase` | 0.001 | Full exposure width (cycles) when `use_list_dpha=False` |
+| `iw` | 0 | 0 unweighted; 1 Gaussian fit using errors (set before `Dopin`) |
+| `covariance_mode` | `"full"` | `"full"` propagated covariance or `"diagonal"` approximation |
+| `ih` | 1 | Unweighted objective: 1 least squares, 0 legacy log objective |
+| `al0` | `None` | Starting entropy weight; `None` selects the automatic scale |
+| `alf` | 1.7 | Factor by which alpha decreases per step |
+| `nal` | `None` | Alpha steps; `None` gives 0 (single alpha) unweighted, 25 weighted |
+| `clim` | `None` | RMS target; `None` is 1.0 (relative RMS for `iw=0`) |
+| `ns` | 7 | Default-map smoothing `exp(-r²/ns²)`, in map pixels |
+| `ac`, `nim` | 8e-4, 1000 | Stationarity tolerance and iteration limit per alpha |
+| `overs` / `map_size` | 0.4 / `None` | Map pixels per axis relative to channels, or an explicit even size |
+| `pb0`, `pb1` | 0, 0 | Open phase interval excluded from the fit; equal values exclude nothing |
+| `instrument_sigma` | 0 | Gaussian line-spread sigma (km/s, not FWHM) |
+| `phase_subsamples` | 0 | Minimum exposure-quadrature samples (0 automatic) |
+| `norm` | 0 | 1 rescales spectra to equal line flux (weighted fits also need `conditional_normalization=True`) |
+| `baseline_fraction` | 0.1 | Baseline map level relative to the RMS flux |
+| `af`, `wid` | 0, 10e5 | Empirical central-absorption prescription (amplitude, cm/s); 0 disables |
+| `nbins` | 20 | Phase bins for diagnostic plots only |
+| `run_timeout`, `max_memory_bytes` | 600 s, 2 GB | Resource limits per run |
+
+## Conventions in brief
+
+| Topic | Convention |
+|---|---|
+| Map axes | `(Vx, Vy)` in km/s, including `sin(i)` |
+| Line-of-sight velocity | `v = gamma - Vx cos(2πφ) + Vy sin(2πφ)` |
+| Overlays | Phase zero is the donor's inferior conjunction |
+| Wavelength to velocity | Relativistic longitudinal Doppler formula |
+| Map units | Input spectral-density units per km/s; the map's velocity-area integral equals the line integral over radial velocity |
+
+PyDoppler does not apply barycentric or air/vacuum corrections. The data,
+`lam0` and `gama` must already use consistent conventions.
+
+The [scientific guide](https://github.com/fcotizelati/pydoppler/blob/master/docs/scientific_conventions.md)
+gives the full definitions:
+
+- the forward model;
+- the likelihoods and covariance propagation;
+- the optimizer and alpha schedule;
+- units and validation.
+
+## Outputs and reproducibility
+
+All files are written to `dop.workdir`:
+
+| File | Contents |
+|---|---|
+| `dopin` | Prepared spectra |
+| `dopin.json` | Preprocessing settings and array hashes |
+| `dop.in` | Solver parameters |
+| `dop.out` | Map and data/model trails |
+| `dop.status` | Convergence, RMS statistic, alpha, baseline |
+| `dop.log` | Iteration log |
+| `run.json` | Input, source, binary and output hashes, and success flag |
+
+`Dopmap()` and `Reco()` refuse outputs that are missing from a successful
+`run.json`. A lock file prevents two runs from sharing a directory.
+
+Directories created by older versions contain the previous fixed-size solver.
+Refresh them with `pydoppler.copy_fortran_code(workdir, overwrite=True)`.
+
+To regenerate the README figures, run `python docs/make_readme_figures.py`.
+
+## Scope and limitations
+
+PyDoppler implements classical two-dimensional Doppler tomography of one line.
+It assumes emission fixed in the co-rotating frame and a known ephemeris,
+systemic velocity and rest wavelength.
+
+It does not model:
+
+- modulated or time-variable emission;
+- occultations or out-of-plane velocities;
+- several lines jointly;
+- wavelength-dependent line-spread functions.
+
+It does not provide posterior uncertainties for map pixels. Check features
+against the following:
+
+- the trailed spectra and residuals;
+- the choice of continuum windows, map size and `clim`;
+- phase coverage;
+- injection and recovery tests on simulated data.
+
+## Citation
+
+If you use PyDoppler, please cite the original method and code, and this package:
+
+* Spruit 1998, arXiv:astro-ph/9806141 ([ADS](https://ui.adsabs.harvard.edu/abs/1998astro.ph..6141S/abstract))
+* Hernandez Santisteban 2021, ASCL:2106.003 ([ADS](https://ui.adsabs.harvard.edu/abs/2021ascl.soft06003H/abstract))
+
+The original code and IDL interface are at <https://wwwmpa.mpa-garching.mpg.de/~henk/>.
+Please report problems through the
+[issue tracker](https://github.com/fcotizelati/pydoppler/issues).

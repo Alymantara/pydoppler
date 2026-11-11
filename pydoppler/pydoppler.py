@@ -10,10 +10,7 @@ from typing import List, Optional, Sequence, Union
 
 import numpy as np
 
-try:  # Python 3.9+
-    from importlib.resources import files as resource_files
-except ImportError:  # pragma: no cover - Python <3.9 fallback
-    from importlib_resources import files as resource_files  # type: ignore
+from importlib.resources import files as resource_files
 
 
 LOGGER = logging.getLogger(__name__)
@@ -109,27 +106,6 @@ class DopplerOutput:
     dpx: np.ndarray
 
 
-def _normalise_to_unit_interval(data: np.ndarray) -> np.ndarray:
-    """Return *data* scaled to [0, 1] while preserving NaNs."""
-
-    arr = np.asarray(data, dtype=float)
-    finite = np.isfinite(arr)
-    if not np.any(finite):
-        return np.full_like(arr, np.nan, dtype=float)
-
-    data_min = float(np.nanmin(arr[finite]))
-    data_max = float(np.nanmax(arr[finite]))
-    span = data_max - data_min
-
-    out = np.full_like(arr, np.nan, dtype=float)
-    if not np.isfinite(span) or span <= 0:
-        out[finite] = 0.0
-        return out
-
-    out[finite] = (arr[finite] - data_min) / span
-    return out
-
-
 def _scale_by_absmax(data: np.ndarray) -> np.ndarray:
     """Scale *data* by its finite absolute maximum, preserving NaNs."""
 
@@ -148,26 +124,39 @@ def _scale_by_absmax(data: np.ndarray) -> np.ndarray:
     return out
 
 
-def _auto_display_limits(data: np.ndarray, *, positive: bool = False) -> List[float]:
-    """Choose robust display limits from finite samples in *data*."""
+def _scale_by_peak(data: np.ndarray) -> np.ndarray:
+    """Divide *data* by its positive peak, so zero flux stays at zero.
+
+    Negative values remain negative. Maps without positive values are scaled
+    by their absolute maximum instead.
+    """
+
+    arr = np.asarray(data, dtype=float)
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return np.full_like(arr, np.nan, dtype=float)
+    peak = float(np.max(arr[finite]))
+    if not np.isfinite(peak) or peak <= 0:
+        return _scale_by_absmax(arr)
+    out = np.full_like(arr, np.nan, dtype=float)
+    out[finite] = arr[finite] / peak
+    return out
+
+
+def _auto_display_limits(data: np.ndarray) -> List[float]:
+    """Robust 5th-95th percentile display limits from finite samples."""
 
     arr = np.asarray(data, dtype=float)
     finite = arr[np.isfinite(arr)]
     if finite.size == 0:
-        return [1e-6, 1.0] if positive else [0.0, 1.0]
-
-    lo = float(np.nanpercentile(finite, 5.0))
-    hi = float(np.nanpercentile(finite, 95.0))
-
-    if positive:
-        lo = max(lo, 1e-6)
-        hi = max(hi, lo * 1.05, 1e-3)
-    elif not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-        vmax = float(np.nanmax(np.abs(finite)))
-        if not np.isfinite(vmax) or vmax <= 0:
+        return [0.0, 1.0]
+    lo = float(np.percentile(finite, 5.0))
+    hi = float(np.percentile(finite, 95.0))
+    if hi <= lo:
+        vmax = float(np.max(np.abs(finite)))
+        if vmax <= 0:
             return [0.0, 1.0]
         lo, hi = -vmax, vmax
-
     return [lo, hi]
 
 
@@ -427,26 +416,22 @@ class spruit:
         if not self.logger.handlers:
             self.logger.addHandler(logging.NullHandler())
 
-        ###### Plotting parameters
-        self.psname='j0644'              # Name of output plot file
-        self.output='pdf'                    # Can choose between: pdf, eps or png
-        self.data=False                      # If True then exit data will put in file *.txt
-        self.plot=True                       # Plot in Python window
-        self.plotlim=1.3                     # Plot limits. 1 = close fit.
-        self.overs=0.4
+        # Plotting and map-grid parameters
+        self.plot = True  # Produce diagnostic figures by default
+        self.overs = 0.4  # Map pixels per axis relative to spectral channels
 
         ####### Dop.in parameters
-        self.ih = 0
+        self.ih = 1  # 1: least squares; 0: legacy positive log objective
         self.iw = 0
         self.pb0 = 0.0
         self.pb1 = 0.0
         self.ns = 7
         self.ac = 8e-4
         self.nim = 1000
-        self.al0 = 0.002
+        self.al0 = None  # None: automatic (0.002 per unit channel information)
         self.alf = 1.7
-        self.nal = 0
-        self.clim = 1.6
+        self.nal = None  # None: 0 for unweighted fits, 25 for Gaussian fits
+        self.clim = None  # None: 1.0
         self.ipri = 2
         self.norm = 0
         self.conditional_normalization = False
@@ -464,10 +449,6 @@ class spruit:
         self.fit_diagnostics = None
         self.valid_phase_mask = None
 
-
-        # %%%%%%%%%%%%%%%%%%  Doppler Options   %%%%%%%%%%%%%%%%%%
-
-        self.lobcol='white'                 # Stream color
 
         if auto_install:
             self.install_assets(self.workdir, force_install)
@@ -1142,7 +1123,7 @@ class spruit:
 
         log(
             logging.INFO,
-            f">> Max/Min velocities in map: {self.vell.min()} / {self.vell.max()}",
+            f">> Min/Max velocities in map: {self.vell.min():.2f} / {self.vell.max():.2f} km/s",
         )
 
 
@@ -1188,6 +1169,7 @@ class spruit:
         import json
         provenance = {
             "schema_version": 1,
+            "object": str(self.object),
             "dopin_sha256": hashlib.sha256(dopin_path.read_bytes()).hexdigest(),
             "continuum_frame": "observed_wavelength",
             "continuum_bands_angstrom": [float(value) for value in xor],
@@ -1315,19 +1297,26 @@ class spruit:
 
 
 
-    def Syncdop(self, nri=0.9, ndi=0.7):
+    def Syncdop(self, nri=None, ndi=None):
         """Build and execute the solver, returning validated fit diagnostics.
 
-        Every call executes the solver; builds are cached by content hashes.
+        Every call executes the solver; the executable is compiled once per
+        source and compiler version and serves every data and map size.
         A run succeeds only if the optimizer converges, the RMS target is met,
         and the finite output matches the current input. ``run.json`` records
-        provenance. With supplied errors, ``covariance_mode='full'`` uses the
-        covariance propagated by :meth:`Dopin`; ``'diagonal'`` is an explicit
-        independence approximation. The fit statistic is RMS, not reduced chi².
+        provenance. With supplied errors, ``covariance_mode='full'`` (default)
+        uses the covariance propagated by :meth:`Dopin`; ``'diagonal'`` is an
+        explicit independence approximation that overstates the information in
+        resampled data. The fit statistic is RMS, not reduced chi².
+        ``nri``/``ndi`` are obsolete and ignored.
         """
         from .runtime import run
 
-        return run(self, nri=nri, ndi=ndi)
+        if nri is not None or ndi is not None:
+            import warnings
+            warnings.warn("Syncdop(nri, ndi) is obsolete: projection storage is now sized "
+                          "exactly at run time.", DeprecationWarning, stacklevel=2)
+        return run(self)
 
     def Dopmap(
         self, dopout: str = "dop.out", cmaps=None, limits=None,
@@ -1341,8 +1330,10 @@ class spruit:
         The returned array is identical to the displayed array, including
         mean removal, smoothing and sign reversal. Pixels outside the
         reconstruction's circular support are NaN. Without mean removal the
-        map is normalized to [0, 1]; mean-subtracted maps use absolute-maximum
-        normalization. ``smooth=True`` applies a Gaussian of sigma one pixel;
+        map is divided by its positive peak, so zero flux stays at zero and
+        negative values stay negative; default limits are 0 and the 99.5th
+        percentile. Mean-subtracted maps use absolute-maximum normalization
+        and symmetric default limits. ``smooth=True`` applies a Gaussian of sigma one pixel;
         a positive float specifies another sigma. Smoothing precedes radial
         mean removal and normalization. ``negative`` reverses the final sign;
         explicit ``limits`` describe the values before that sign reversal.
@@ -1399,9 +1390,15 @@ class spruit:
             data -= create_profile(data, radial_profile(data, center), center)
             display = _scale_by_absmax(data)
         else:
-            display = _normalise_to_unit_interval(data)
+            display = _scale_by_peak(data)
         if limits is None:
-            limits = _auto_display_limits(display, positive=not remove_mean)
+            finite = display[np.isfinite(display)]
+            if remove_mean:
+                bound = float(np.percentile(np.abs(finite), 99.5)) if finite.size else 1.0
+                limits = [-bound, bound] if bound > 0 else [-1.0, 1.0]
+            else:
+                top = float(np.percentile(finite, 99.5)) if finite.size else 1.0
+                limits = [0.0, top if top > 0 else 1.0]
         if negative:
             display = -display
             limits = [-limits[1], -limits[0]]
@@ -1434,7 +1431,7 @@ class spruit:
         cbar = None
         if colorbar:
             cbar_obj = fig.colorbar(img, ax=ax, format="%.2f", fraction=0.046, pad=0.04)
-            cbar_obj.set_label("Normalised Flux")
+            cbar_obj.set_label("Flux / map peak" if not remove_mean else "Flux / max |flux|")
             cbar = DraggableColorbar(cbar_obj, img)
             cbar.connect()
         fig.tight_layout()
@@ -2048,9 +2045,6 @@ def intrk(z,w,dt,z1,z2,qm):
     dw=(hw0+2*hw1+2*hw2+hw3)/6.
     return dz,dw
 
-def xy(r,phi):
-  return r*np.cos(phi), r*np.sin(phi)
-
 def resonance(j, k, k1, q, porb=None, m1=None):
     """Plot projected j:(j-k) resonance and tidal-truncation velocity circles.
 
@@ -2076,61 +2070,10 @@ def resonance(j, k, k1, q, porb=None, m1=None):
     phis = np.linspace(0, 2 * np.pi, 629)
     for radius, style in ((resonance_radius, ":"), (tidal_radius, "-")):
         velocity = k1 * np.sqrt((1 + q) / radius) / q
-        xx, yy = xy(velocity, phis)
+        xx, yy = velocity * np.cos(phis), velocity * np.sin(phis)
         plt.plot(xx, yy - k1, c="k", ls=style)
     plt.draw()
 
-
-def colorline(
-    x, y, z=None, cmap=None, norm=None, linewidth=3, alpha=1.0
-):
-    """
-    http://nbviewer.ipythonp.org/github/dpsanders/matplotlib-examples/blob/master/colorline.ipynb
-    http://matplotlib.org/examples/pylab_examples/multicolored_line.html
-    Plot a colored line with coordinates x and y
-    Optionally specify colors in the array z
-    Optionally specify a colormap, a norm function and a line width
-    """
-
-    _, plt = _lazy_import_matplotlib_pyplot()
-    from matplotlib.collections import LineCollection
-    from matplotlib.colors import Normalize
-
-    if cmap is None:
-        cmap = plt.get_cmap("copper")
-    if norm is None:
-        norm = Normalize(0.0, 1.0)
-
-    # Default colors equally spaced on [0,1]:
-    if z is None:
-        z = np.linspace(0.0, 1.0, len(x))
-
-    # Special case if a single number:
-    if not hasattr(z, "__iter__"):  # to check for numerical input -- this is a hack
-        z = np.array([z])
-
-    z = np.asarray(z)
-
-    segments = make_segments(x, y)
-    lc = LineCollection(segments, array=z, cmap=cmap, norm=norm,
-                        linewidth=linewidth, alpha=alpha)
-
-    ax = plt.gca()
-    ax.add_collection(lc)
-
-    return lc
-
-
-def make_segments(x, y):
-    """
-    Create list of line segments from x and y coordinates, in the correct format
-    for LineCollection: an array of the form numlines x (points per line) x 2 (x
-    and y) array
-    """
-
-    points = np.array([x, y]).T.reshape(-1, 1, 2)
-    segments = np.concatenate([points[:-1], points[1:]], axis=1)
-    return segments
 
 def test_data(
     destination: Optional[Union[Path, str]] = None,
@@ -2144,8 +2087,3 @@ def test_data(
     LOGGER.info("Copied %d test data files to %s", len(copied), dest_dir)
     return copied
 
-
-def _phase_signed_delta(a: np.ndarray, b: float) -> np.ndarray:
-    """Return signed circular phase difference in [-0.5, 0.5)."""
-
-    return ((a - b + 0.5) % 1.0) - 0.5

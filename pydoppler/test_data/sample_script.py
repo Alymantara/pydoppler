@@ -1,3 +1,9 @@
+"""PyDoppler tutorial: U Gem H-alpha Doppler tomography (Echevarria et al. 2007).
+
+Run from a terminal with ``python sample_script.py`` (or ``%run sample_script.py``
+in IPython). Everything is written to ./pydoppler-workdir.
+"""
+
 import os
 from pathlib import Path
 
@@ -18,21 +24,18 @@ def main() -> None:
 
     import matplotlib.pyplot as plt
 
-    # Import sample data
+    # Copy the bundled U Gem spectra and the solver sources.
     # <<< COMMENT OUT IF YOU DONT NEED THE TEST DATASET >>>
     pydoppler.copy_test_data(workdir, overwrite=True)
-
     pydoppler.copy_fortran_code(workdir, overwrite=True)
 
-    # Load base object for tomography
     dop = pydoppler.spruit(workdir=workdir)
 
     # Basic data for the tomography to work
     dop.object = 'U Gem'
-    dop.base_dir = workdir / 'ugem99' # Base directory for input spectra
-    dop.list = 'ugem0all.fas'		# Name of the input file
+    dop.base_dir = workdir / 'ugem99'  # Directory with spectra and phase file
+    dop.list = 'ugem0all.fas'  # Phase file: name, mid-exposure phase, exposure width
     dop.lam0 = 6562.8  # Rest wavelength in Angstrom
-    dop.delta_phase = 0.003  # Full exposure width in orbital cycles
     dop.delw = 35  # Rest-frame line-window half-width in Angstrom
     dop.overs = 0.3  # Map pixels per axis / spectral velocity-channel count
     dop.gama = 36.0  # Systemic redshift in km/s, removed before inversion
@@ -42,22 +45,23 @@ def main() -> None:
     dop.Foldspec()
 
     # Subtract the continuum and resample onto a common velocity grid.
-    # This bundled dataset has no uncertainties: its fit is illustrative.
-    # Supply measured flux errors for weighted fits and calibrated diagnostics.
+    # The phase file's third column holds each exposure width (600 s =
+    # 0.0393 cycles, Echevarria et al. 2007), so use it instead of delta_phase.
+    # The bundled spectra have no uncertainties, so this fit is unweighted
+    # (iw=0); see the README for a noise-weighted fit.
     dop.Dopin(
         continuum_band=[6500, 6537, 6591, 6620],
         plot_median=False,
         poly_degree=2,
+        use_list_dpha=True,
         show=False,
     )
 
     # Perform tomography
     dop.Syncdop()
 
-    # This routine will display the outcome of the Doppler tomography.
-    # You can overplot contours and streams.
+    # The map is shown as a fraction of its peak; zero flux is zero.
     _cbar, _data = dop.Dopmap(
-        limits=[0.05, 0.99],
         colorbar=True,
         cmaps=plt.cm.magma,
         smooth=False,
@@ -67,13 +71,13 @@ def main() -> None:
 
     # Overlay projected donor, Keplerian and ballistic velocities.
     # K1 fixes the velocity scale; M1/P/q/i provide a consistency check.
-    qm=0.35  # M2/M1
+    qm = 0.35  # M2/M1
     k1 = 107  # Observed primary semi-amplitude in km/s
-    inc=70  # Degrees
-    m1=1.2  # Solar masses
-    porb=0.1769061911  # Days
+    inc = 70  # Degrees
+    m1 = 1.2  # Solar masses
+    porb = 0.1769061911  # Days
 
-    pydoppler.stream(qm,k1,porb,m1,inc)
+    pydoppler.stream(qm, k1, porb, m1, inc)
 
     # Compare input and reconstructed trails on one common flux scale.
     # Visual agreement alone is not a significance or uncertainty estimate;
@@ -88,16 +92,6 @@ def main() -> None:
     if SAVE_PDFS:
         outdir = workdir / "output_images"
         outdir.mkdir(parents=True, exist_ok=True)
-        for stale_name in (
-            "Average_Spec.pdf",
-            "Residuals.pdf",
-            "Average_Spec.png",
-            "Residuals.png",
-            "Trail.png",
-            "Doppler_Map.png",
-            "Reconstruction.png",
-        ):
-            (outdir / stale_name).unlink(missing_ok=True)
         figures = {
             "Trail": "Trail.pdf",
             "Doppler Map": "Doppler_Map.pdf",

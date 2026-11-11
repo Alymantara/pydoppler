@@ -16,6 +16,7 @@ def _prepared(dopdir):
     dop = pydoppler.spruit(workdir=dopdir)
     dop.verbose = False
     dop.iw = 1
+    dop.covariance_mode = "full"
     dop.map_size = 20
     dop.ns = 3
     dop.nim = 4000

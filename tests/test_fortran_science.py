@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from pydoppler.pydoppler import _parse_dopout
+from pydoppler.runtime import write_precision_block, write_precision_header
 
 
 @pytest.fixture(scope="module")
@@ -16,28 +17,36 @@ def scientific_core(tmp_path_factory):
         pytest.skip("gfortran is required for the independent core checks")
     work = tmp_path_factory.mktemp("fortran_science_build")
     source = Path(__file__).resolve().parents[1] / "pydoppler" / "fortran_code"
-    (work / "emap.par").write_text(
-        "      parameter (npm=4,nvpm=41,nvm=20)\n"
-        "      parameter (nd=npm*nvpm,nr=nvm*nvm)\n"
-        "      parameter (nri=nr,ndi=nd)\n"
-        "      parameter (nf=nd,nfp=ndi,nrp=nri)\n"
-        "      parameter (ni=nvm,nj=nvm)\n"
-        "      parameter (nch=1,nsu=1)\n"
-    )
-    shutil.copy(source / "dop.f", work / "dop.f")
-    shutil.copy(source / "cclock.f", work / "clock.f")
+    shutil.copy(source / "dop_core.f90", work / "dop_core.f90")
+    shutil.copy(source / "dop.f90", work / "dop.f90")
     result = subprocess.run(
-        [compiler, "-O0", "-g", "-fcheck=all", "-ffixed-line-length-none",
-         "dop.f", "clock.f", "-o", "dopp"],
+        [compiler, "-O0", "-g", "-fcheck=all", "-Wall",
+         "dop_core.f90", "dop.f90", "-o", "dopp"],
         cwd=work, capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "Warning:" not in result.stderr
+    assert "Warning:" not in result.stderr.replace(
+        "Warning: Equality comparison for REAL(8)", "")
     return work / "dopp"
 
 
+def _compile_with_core(binary, tmp_path, name, program):
+    """Compile a test program against the solver module, independently of the driver."""
+    shutil.copy(binary.parent / "dop_core.f90", tmp_path / "dop_core.f90")
+    (tmp_path / f"{name}.f90").write_text(program)
+    result = subprocess.run(
+        [shutil.which("gfortran"), "-O0", "-fcheck=all", "dop_core.f90", f"{name}.f90",
+         "-o", name], cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    result = subprocess.run([f"./{name}"], cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout
+
+
 def _run(binary, work, *, scale=1.0, iw=1, precision=None, norm=0,
-         phases=None, flux=None, nim=1000, ac=8e-4, alpha=.003, mask=(0.0, 0.0)):
+         phases=None, flux=None, nim=1000, ac=8e-4, alpha=.003, mask=(0.0, 0.0),
+         ih=0, nal=-1, clim=99.0):
     work.mkdir()
     phases = np.array([0.0, 0.25, 0.5, 0.75]) if phases is None else np.asarray(phases)
     velocity = np.linspace(-1000.0, 1000.0, 41)
@@ -54,17 +63,16 @@ def _run(binary, work, *, scale=1.0, iw=1, precision=None, norm=0,
         values.append(" ".join(f"{s:.17e}" for s in sigma.T.ravel()))
     (work / "dopin").write_text("\n".join(values)+"\n")
     (work / "dop.in").write_text(
-        f"0\n{iw}\n{mask[0]} {mask[1]}\n3\n{ac}\n{nim}\n"
-        f"{alpha} 1.7 -1\n99\n1\n{norm}\n1 0\n0 0 .1\n"
+        f"{ih}\n{iw}\n{mask[0]} {mask[1]}\n3\n{ac}\n{nim}\n"
+        f"{alpha} 1.7 {nal}\n{clim}\n1\n{norm}\n1 0\n0 0 .1\n20\n"
     )
     if iw == 2:
         if precision is None:
             precision = np.repeat((np.eye(41)/0.3**2)[None], 4, axis=0)
-        with (work / "dop.precision").open("w") as handle:
-            handle.write("4 41\n")
+        with (work / "dop.precision").open("wb") as handle:
+            write_precision_header(handle, 4, 41)
             for matrix in precision:
-                handle.write("41\n")
-                np.savetxt(handle, matrix/scale**2, fmt="%.17e")
+                write_precision_block(handle, 41, matrix/scale**2)
     result = subprocess.run([str(binary)], cwd=work, capture_output=True, text=True)
     status = {}
     if (work / "dop.status").exists():
@@ -154,8 +162,13 @@ def test_signed_samples_are_preserved_including_window_edges(scientific_core, tm
     velocity = np.linspace(-1000, 1000, 41)
     flux = -.2 + 4*np.exp(-.5*((velocity[None, :]-
                              300*np.sin(2*np.pi*phases[:, None]))/160)**2)
-    result, _, output, raw, _ = _run(scientific_core, tmp_path/"negative", flux=flux)
+    result, status, output, raw, _ = _run(scientific_core, tmp_path/"negative", flux=flux,
+                                          alpha=0.0)
     assert result.returncode == 0, result.stdout+result.stderr
+    # Gaussian fits keep the requested baseline: negative data are not allowed
+    # to lift it (which formerly removed the positivity constraint).
+    assert status["baseline"] == pytest.approx(0.1)
+    assert status["baseline_raised"] == 0
     assert np.any(output.dm < 0)
     np.testing.assert_allclose(output.dm.T, raw, rtol=5e-5, atol=1e-7)
 
@@ -169,173 +182,167 @@ def test_phase_mask_endpoints_remain_open_across_phase_wrap(scientific_core, tmp
 
 def test_objective_derivatives_and_projection_adjoint(scientific_core, tmp_path):
     """Check derivatives against independent finite differences, including covariance."""
-    build = scientific_core.parent
-    source = (build / "dop.f").read_text()
-    core = source[:source.index("      program dopmap")]+source[source.index("      subroutine statistical_input"):]
-    (tmp_path / "core.f").write_text(core)
-    shutil.copy(build / "emap.par", tmp_path / "emap.par")
-    shutil.copy(build / "clock.f", tmp_path / "clock.f")
-    (tmp_path / "derivatives.f").write_text(r'''
-      program derivatives
-      use dop_science
-      implicit real*8(a-h,o-z)
-      include 'emap.par'
-      common/phases/dpha(npm)
-      common/foldn/nv,indx(nr),indy(nr),nol
-      common/cabsf/wid,af
-      real*4 p(ndi,nr),pt(nri,nd)
-      dimension pha(npm),vp(nvpm),ps(nr),direction(nr),trial(nr)
-      dimension ph(nd),pht(nd),dha(nr),dsa(nr),chi(nr,1),tem(nr),ex(nr)
-      dimension epc(1),testdata(nd),back(nr),forward(nd)
-      integer inc(1,1),nsm(1,1),ico(1)
-      stat_iw=2
-      nphase=npm
-      nvelocity=nvpm
-      allocate(precision(nvpm,nvpm,npm),stat_weights(nd),phase_valid(npm))
-      phase_valid=.true.
-      phase_valid(2)=.false.
-      stat_weights=1.d0
-      precision=0.d0
-      do ip=1,npm
-        pha(ip)=(ip-1)*8.d0*atan(1.d0)/npm
-        dpha(ip)=0.01d0
-        do iv=1,nvpm
-          precision(iv,iv,ip)=2.d0
-          if(iv.lt.nvpm) then
-            precision(iv,iv+1,ip)=-0.25d0
-            precision(iv+1,iv,ip)=-0.25d0
-          endif
-        enddo
-      enddo
-      do iv=1,nvpm
-        vp(iv)=-1000.d0+(iv-1)*50.d0
-      enddo
-      nv=nvm
-      wid=1.d0
-      af=0.d0
-      call prom(va,nv,pha,npm,vp,nvpm,pt,p)
-      do j=1,nol
-        ps(j)=2.d0+0.5d0*sin(dble(j))
-        direction(j)=0.2d0*cos(dble(j)*0.3d0)
-      enddo
-      do i=1,nd
-        pht(i)=1.d0+0.2d0*cos(dble(i))
-        testdata(i)=sin(dble(i)*0.7d0)
-      enddo
-      call fproj(pt,nd,nol,direction,forward)
-      call bproj(p,nd,nol,testdata,back)
-      write(*,*)dot_product(forward,testdata),
-     *          dot_product(direction(1:nol),back(1:nol))
-      inc=1
-      nsm=3
-      ico=1
-      epc=1.d0
-      al=0.7d0
-      call fproj(pt,nd,nol,ps,ph)
-      call like(pht,ph,p,nd,nol,1,h,dha)
-      call entr(ps,nd,nol,s,dsa,chi,tem,ex,1,inc,nsm,epc,ico,0.d0,1,0.d0)
-      derivh=dot_product(direction(1:nol),dha(1:nol))
-      derivs=dot_product(direction(1:nol),dsa(1:nol))
-      q0=h+al*s
-      call lamun(pht,ps,direction,direction,pt,ph,chi,tem,ex,al,nd,nol,
-     *           fla,fmu,1,inc,nsm,epc,ico,0.d0,1,1,0.d0)
-      hessian=-(derivh+al*derivs)/fmu
-      eps=1.d-3
-      trial(1:nol)=ps(1:nol)+eps*direction(1:nol)
-      call fproj(pt,nd,nol,trial,ph)
-      call like(pht,ph,p,nd,nol,1,hplus,dha)
-      call entr(trial,nd,nol,splus,dsa,chi,tem,ex,1,inc,nsm,epc,ico,0.d0,1,0.d0)
-      trial(1:nol)=ps(1:nol)-eps*direction(1:nol)
-      call fproj(pt,nd,nol,trial,ph)
-      call like(pht,ph,p,nd,nol,1,hminus,dha)
-      call entr(trial,nd,nol,sminus,dsa,chi,tem,ex,1,inc,nsm,epc,ico,0.d0,1,0.d0)
-      write(*,*)derivh,(hplus-hminus)/(2.d0*eps)
-      write(*,*)derivs,(splus-sminus)/(2.d0*eps)
-      write(*,*)hessian,(hplus+al*splus-2.d0*q0+hminus+al*sminus)/eps**2
-      end
-''')
-    result = subprocess.run(
-        [shutil.which("gfortran"), "-O0", "-fcheck=all", "-ffixed-line-length-none",
-         "core.f", "derivatives.f", "clock.f", "-o", "derivatives"],
-        cwd=tmp_path, capture_output=True, text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    result = subprocess.run(["./derivatives"], cwd=tmp_path, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    pairs = np.array([[float(x) for x in line.split()] for line in result.stdout.splitlines()])
+    output = _compile_with_core(scientific_core, tmp_path, "derivatives", r"""
+program derivatives
+  use dop_science
+  implicit none
+  real(dp), allocatable :: pha(:), vp(:), ps(:), direction(:), trial(:), ph(:), pht(:)
+  real(dp), allocatable :: dha(:), dsa(:), chi(:), tem(:), testdata(:), back(:), forward(:)
+  real(dp) :: h, s, al, q0, derivh, derivs, hessian, eps, hplus, hminus, splus, sminus, fla, fmu
+  integer :: ip, iv, j, i
+  nph = 4; nvp = 41; nv = 20; nil = nph*nvp
+  stat_iw = 2; smoothing_width = 3; likelihood_scale = 0.7_dp
+  allocate(pha(nph), dpha(nph), vp(nvp), precision(nvp, nvp, nph), stat_weights(nil))
+  allocate(phase_valid(nph))
+  phase_valid = .true.; phase_valid(2) = .false.
+  stat_weights = 1; precision = 0
+  do ip = 1, nph
+    pha(ip) = (ip - 1)*pi2/nph
+    dpha(ip) = 0.01_dp
+    do iv = 1, nvp
+      precision(iv, iv, ip) = 2
+      if (iv < nvp) then
+        precision(iv, iv + 1, ip) = -0.25_dp
+        precision(iv + 1, iv, ip) = -0.25_dp
+      end if
+    end do
+  end do
+  do iv = 1, nvp
+    vp(iv) = -1000 + (iv - 1)*50.0_dp
+  end do
+  call build_projection(pha, vp)
+  allocate(ps(nol), direction(nol), trial(nol), ph(nil), pht(nil), dha(nol), dsa(nol))
+  allocate(chi(nol), tem(nol), testdata(nil), back(nol), forward(nil))
+  do j = 1, nol
+    ps(j) = 2 + 0.5_dp*sin(real(j, dp))
+    direction(j) = 0.2_dp*cos(j*0.3_dp)
+  end do
+  do i = 1, nil
+    pht(i) = 1 + 0.2_dp*cos(real(i, dp))
+    testdata(i) = sin(i*0.7_dp)
+  end do
+  call fproj(direction, forward)
+  call bproj(testdata, back)
+  write(*, *) dot_product(forward, testdata), dot_product(direction, back)
+  al = 0.7_dp
+  call fproj(ps, ph)
+  call like(pht, ph, 1, h, dha)
+  call entr(ps, s, dsa, chi, tem)
+  derivh = dot_product(direction, dha)
+  derivs = dot_product(direction, dsa)
+  q0 = h + al*s
+  call lamun(pht, ps, direction, direction, ph, chi, tem, al, 1, fla, fmu)
+  hessian = -(derivh + al*derivs)/fmu
+  eps = 1.0e-3_dp
+  trial = ps + eps*direction
+  call fproj(trial, ph); call like(pht, ph, 1, hplus, dha); call entr(trial, splus, dsa, chi, tem)
+  trial = ps - eps*direction
+  call fproj(trial, ph); call like(pht, ph, 1, hminus, dha); call entr(trial, sminus, dsa, chi, tem)
+  write(*, *) derivh, (hplus - hminus)/(2*eps)
+  write(*, *) derivs, (splus - sminus)/(2*eps)
+  write(*, *) hessian, (hplus + al*splus - 2*q0 + hminus + al*sminus)/eps**2
+end program derivatives
+""")
+    pairs = np.array([[float(x) for x in line.split()] for line in output.splitlines()])
     np.testing.assert_allclose(pairs[:, 0], pairs[:, 1], rtol=2e-6, atol=1e-7)
+
+
+def _projection_profile(binary, tmp_path, phase, width, sigma):
+    """One bright map pixel projected through a full exposure, on irregular bins."""
+    output = _compile_with_core(binary, tmp_path, "projection", f"""
+program projection
+  use dop_science
+  implicit none
+  real(dp), allocatable :: pha(:), vp(:), spot(:), trail(:)
+  real(dp) :: x, pi
+  integer :: iv, j
+  nph = 4; nvp = 41; nv = 20; nil = nph*nvp
+  pi = 4*atan(1.0_dp)
+  allocate(pha(nph), dpha(nph), vp(nvp))
+  pha = {phase!r}_dp*pi2
+  dpha = {width!r}_dp*pi2
+  do iv = 1, nvp
+    x = -1 + 2*real(iv - 1, dp)/(nvp - 1)
+    vp(iv) = 1000*x + 100*sin(pi*x)
+  end do
+  instrument_sigma = {sigma!r}_dp
+  phase_subsamples = 1024
+  call build_projection(pha, vp)
+  allocate(spot(nol), trail(nil))
+  spot = 0
+  do j = 1, nol
+    if (indx(j) == 11 .and. indy(j) == 6) spot(j) = nph
+  end do
+  call fproj(spot, trail)
+  do iv = 1, nvp
+    write(*, *) vp(iv), trail(1 + (iv - 1)*nph)
+  end do
+end program projection
+""")
+    return np.array([[float(x) for x in line.split()] for line in output.splitlines()]).T
+
+
+def _independent_square_pixel(centers, phase, width, sigma, vx=0.5, vy=-4.5):
+    """Gauss-Legendre average over exposure phase and a uniform square pixel."""
+    from scipy.special import ndtr
+
+    edges = np.r_[centers[0]-(centers[1]-centers[0])/2, (centers[:-1]+centers[1:])/2,
+                  centers[-1]+(centers[-1]-centers[-2])/2]
+    pixel = 2000/19
+    phase_nodes, phase_weight = np.polynomial.legendre.leggauss(256)
+    pix_nodes, pix_weight = np.polynomial.legendre.leggauss(64)
+    angle = 2*np.pi*(phase + width*phase_nodes/2)
+    ux = pixel/2*pix_nodes
+    # Internal velocity components of pixel (ix=11, iy=6) on a 20-pixel grid,
+    # in pixel units: (ix - 10.5, iy - 10.5).
+    centre_x, centre_y = pixel*vx, pixel*vy
+    radial = ((centre_x + ux)[None, :, None]*np.sin(angle)[:, None, None]
+              - (centre_y + ux)[None, None, :]*np.cos(angle)[:, None, None])
+    if sigma > 0:
+        cdf = ndtr((edges[:, None, None, None] - radial[None])/sigma)
+    else:
+        cdf = (edges[:, None, None, None] >= radial[None]).astype(float)
+    weights = (phase_weight[:, None, None]/2 * pix_weight[None, :, None]/2
+               * pix_weight[None, None, :]/2)
+    return np.einsum("vpab,pab->v", np.diff(cdf, axis=0), weights)
 
 
 def test_exposure_quadrature_lsf_and_irregular_velocity_bins(scientific_core, tmp_path):
     """Compare the forward operator with independent phase/pixel quadrature."""
-    from scipy.special import ndtr
-
-    build = scientific_core.parent
-    source = (build / "dop.f").read_text()
-    core = source[:source.index("      program dopmap")]+source[source.index("      subroutine statistical_input"):]
-    (tmp_path / "core.f").write_text(core)
-    shutil.copy(build / "emap.par", tmp_path / "emap.par")
-    shutil.copy(build / "clock.f", tmp_path / "clock.f")
-    (tmp_path / "projection.f").write_text(r'''
-      program projection
-      use dop_science
-      implicit real*8(a-h,o-z)
-      include 'emap.par'
-      common/phases/dpha(npm)
-      common/foldn/nv,indx(nr),indy(nr),nol
-      common/cabsf/wid,af
-      real*4 p(ndi,nr),pt(nri,nd)
-      dimension pha(npm),vp(nvpm),spot(nr),trail(nd)
-      pi=4.d0*atan(1.d0)
-      pha=0.d0
-      dpha=pi
-      do iv=1,nvpm
-        x=-1.d0+2.d0*(iv-1)/(nvpm-1)
-        vp(iv)=1000.d0*x+100.d0*sin(pi*x)
-      enddo
-      nv=nvm
-      wid=1.d0
-      af=0.d0
-      instrument_sigma=40.d0
-      phase_subsamples=1024
-      call prom(va,nv,pha,npm,vp,nvpm,pt,p)
-      spot=0.d0
-      do j=1,nol
-        if(indx(j).eq.11.and.indy(j).eq.6) spot(j)=npm
-      enddo
-      call fproj(pt,nd,nol,spot,trail)
-      do iv=1,nvpm
-        write(*,*)vp(iv),trail(1+(iv-1)*npm)
-      enddo
-      end
-''')
-    result = subprocess.run(
-        [shutil.which("gfortran"), "-O2", "-fcheck=all", "-ffixed-line-length-none",
-         "core.f", "projection.f", "clock.f", "-o", "projection"],
-        cwd=tmp_path, capture_output=True, text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    result = subprocess.run(["./projection"], cwd=tmp_path, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    profile = np.array([[float(x) for x in line.split()] for line in result.stdout.splitlines()])
-    centers, actual = profile.T
-    edges = np.r_[centers[0]-(centers[1]-centers[0])/2,
-                  (centers[:-1]+centers[1:])/2,
-                  centers[-1]+(centers[-1]-centers[-2])/2]
-    # Independent Gaussian bin integrals, averaged over orbital phase and
-    # the two halves of a triangular pixel basis with Gauss-Legendre nodes.
-    phase_nodes, phase_weight = np.polynomial.legendre.leggauss(256)
-    pixel_nodes, pixel_weight = np.polynomial.legendre.leggauss(48)
-    pixel_halfwidth = (2000/19)/2
-    pixel_left = pixel_halfwidth*(pixel_nodes-1)/2
-    pixel_right = pixel_halfwidth*(pixel_nodes+1)/2
-    pixel = np.r_[pixel_left, pixel_right]
-    pixel_weight = np.tile(pixel_weight, 2)*pixel_halfwidth/2
-    pixel_weight *= (pixel_halfwidth-np.abs(pixel))/pixel_halfwidth**2
-    phase = phase_nodes*np.pi/2
-    radial = (2000/19)*(.5*np.sin(phase)+4.5*np.cos(phase))
-    cdf = ndtr((edges[:, None, None]-radial[None, :, None]-pixel[None, None, :])/40)
-    expected = np.einsum("vpu,p,u->v", np.diff(cdf, axis=0), phase_weight/2, pixel_weight)
+    centers, actual = _projection_profile(scientific_core, tmp_path, 0.0, 0.5, 40.0)
+    expected = _independent_square_pixel(centers, 0.0, 0.5, 40.0)
     np.testing.assert_allclose(actual, expected, atol=5e-7, rtol=2e-5)
     assert actual.sum() == pytest.approx(1.0, abs=1e-7)
     assert centers @ actual > 250  # Endpoint-only smearing formerly gave zero.
+
+
+def test_square_pixels_project_without_ripple_at_cardinal_phases(scientific_core, tmp_path):
+    """A uniform pixel seen at phase 0 projects as a box; the old triangle did not."""
+    centers, actual = _projection_profile(scientific_core, tmp_path, 0.0, 1e-12, 0.0)
+    edges = np.r_[centers[0]-(centers[1]-centers[0])/2, (centers[:-1]+centers[1:])/2,
+                  centers[-1]+(centers[-1]-centers[-2])/2]
+    pixel = 2000/19
+    lo, hi = 4.0*pixel, 5.0*pixel  # v = -Vy_internal at phase 0, Vy_internal = -4.5 px
+    expected = np.clip(np.minimum(edges[1:], hi) - np.maximum(edges[:-1], lo), 0, None)/pixel
+    np.testing.assert_allclose(actual, expected, atol=1e-9)
+    assert actual.sum() == pytest.approx(1.0, abs=1e-12)
+
+
+def test_alpha_schedule_brackets_target_and_reports_plateau(scientific_core, tmp_path):
+    """The schedule refines a crossing by bisection and detects infeasible targets."""
+    rng = np.random.default_rng(4)
+    phases = np.array([0.0, 0.25, 0.5, 0.75])
+    velocity = np.linspace(-1000.0, 1000.0, 41)
+    clean = 1 + 4*np.exp(-0.5*((velocity[None, :] - 300*np.sin(2*np.pi*phases[:, None]))/160)**2)
+    noisy = clean + 0.3*rng.normal(size=clean.shape)
+    result, status, _, _, _ = _run(scientific_core, tmp_path/"bracket", flux=noisy,
+                                   alpha=30.0, nal=40, clim=1.1)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert status["target_bracketed"] == 1
+    assert status["alpha_steps"] > 2
+    assert 1.1*(1 - 0.006) <= status["fit_statistic"] <= 1.1
+    result, status, _, _, _ = _run(scientific_core, tmp_path/"plateau", flux=noisy,
+                                   alpha=30.0, nal=40, clim=0.2)
+    assert result.returncode != 0
+    assert status["optimizer_status"] == 1
+    assert status["rms_plateau"] == 1

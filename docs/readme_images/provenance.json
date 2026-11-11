@@ -1,23 +1,17 @@
 {
-  "generator": "sample_script.py:main() with SAVE_PDFS=False and Agg backend",
-  "plotting": "Rasterized spectral meshes; vector axes and labels; unchanged sample parameters; SVG trailing whitespace normalized without changing rendering",
-  "run_output_sha256": "0b7652b2f355ca93312e10e23cabd5b91211313206d4ab18674a1736c2b5854f",
+  "generator": "docs/make_readme_figures.py (sample_script.main(), Agg backend)",
+  "run_output_sha256": "ae47c0cb62b1a96bb7eb2e773d9bdd31640f05e7ad4a07ffb56f0a681b5bd537",
   "sources": {
-    "sample_script.py": "b51beaa8599ba453c090b76abab899f39352fbeb94a0c2087445b6282b2e0053",
-    "pydoppler/pydoppler.py": "6366cc6b469ac009fcb700f460037117d81e1c4f57cae8dc191522ebc26fb1fd",
+    "sample_script.py": "23f85f430ea3075f76173ed6928115025757a830d386a8aa9c0a3c818f65c9c1",
+    "pydoppler/pydoppler.py": "0c1d148189e7cb5b70319a5c78b0d139f10981aec2ac957d26734fccb0d37926",
     "pydoppler/preprocessing.py": "272436cc818b2ec74346c24bc63bc79abce3dc6f6db90830d917be4efc1e3c54",
-    "pydoppler/runtime.py": "f8fff12f062ed74ffbeac781bee6b47bb2832f1759a237475cc53bc40c8d141e",
-    "pydoppler/fortran_code/dop.f": "a373579a6e74e41175a22aa8e9e64187073ef451e1cd4c252d154838f4d4e824"
+    "pydoppler/runtime.py": "b6d4fa2e4058dcba1f3fd5ca437fd8ebe96a45f4ded9e693e87eec0916278c56",
+    "pydoppler/fortran_code/dop_core.f90": "96674d5b56e372d4679621261bfe8abd1e56b8ed2d53f0bb7224191618929aa8",
+    "pydoppler/fortran_code/dop.f90": "d659973a15282f043ebc0cc841953ce7ccd8d14f2f957312541812877964ad0c"
   },
   "outputs": {
-    "docs/readme_images/Trail.svg": "1333ba57b222752bc7a6cafbbe6819eefd325d430b99973cbc4821325ec064a7",
-    "output_images/Trail.pdf": "ed4d61202a98b529f747ad74f1dfec7e13c21695dadd1385a901246911bf66a3",
-    "pydoppler/test_data/output_images/Trail.pdf": "ed4d61202a98b529f747ad74f1dfec7e13c21695dadd1385a901246911bf66a3",
-    "docs/readme_images/Doppler_Map.svg": "af5ca5c998e3c21b355726ae0648e238ec5cdeb3def105ba7e2e34a57e047271",
-    "output_images/Doppler_Map.pdf": "ed40463acf40c17e4de6f2520ff7b47d384c6e45e4197cd81bc0f182a2627dcc",
-    "pydoppler/test_data/output_images/Doppler_Map.pdf": "ed40463acf40c17e4de6f2520ff7b47d384c6e45e4197cd81bc0f182a2627dcc",
-    "docs/readme_images/Reconstruction.svg": "15208d460ff113941ca8ac0f7813b4967428f32b475b4c5486bed66cefc585cf",
-    "output_images/Reconstruction.pdf": "039345f647d7c5c6d2a08f90a87e01dcab530612047e12a481437e50a6b3ca4f",
-    "pydoppler/test_data/output_images/Reconstruction.pdf": "039345f647d7c5c6d2a08f90a87e01dcab530612047e12a481437e50a6b3ca4f"
+    "docs/readme_images/Trail.svg": "54907c80ded0d0e748a0db473a4372654326d863df04ed93591f0cf49f31b78a",
+    "docs/readme_images/Doppler_Map.svg": "f63c8acfe175f4790a641b7d6239b06f499a82cdac95875d48489cba68ac2256",
+    "docs/readme_images/Reconstruction.svg": "88dee478c635c2e672b6e23336fa80b11f3ed9eb2ec8e2eb9a06e17896eb8b9c"
   }
 }

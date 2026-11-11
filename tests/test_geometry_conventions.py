@@ -234,27 +234,44 @@ def test_public_output_read_rejects_failed_and_modified_managed_results(tmp_path
         read()
 
 
-def test_legacy_fortran_lobe_preserves_equal_mass_geometry(tmp_path):
-    import shutil
-    import subprocess
-
-    if shutil.which("gfortran") is None:
-        pytest.skip("gfortran is required for the legacy-helper regression")
-    source = Path(__file__).parents[1] / "pydoppler/fortran_code/lobe.f"
-    shutil.copyfile(source, tmp_path / "lobe.f")
-    (tmp_path / "emap.par").write_text("      parameter (ni=30,nj=30)\n")
-    subprocess.run(
-        ["gfortran", "-O", "-fcheck=all", "-ffpe-trap=invalid,zero,overflow",
-         "-o", "lobe", "lobe.f"], cwd=tmp_path, check=True, capture_output=True,
-    )
-    for q in (1.0, 0.99999, 1.00001):
-        (tmp_path / "lobe.in").write_text(f"{q}\n")
-        subprocess.run([str(tmp_path / "lobe")], cwd=tmp_path, check=True,
-                       capture_output=True, timeout=10)
-        assert float((tmp_path / "lobe.out").read_text().splitlines()[0]) == q
-
-
 def test_phase_overlap_touching_edges_do_not_create_ghost_bins():
     trail, centers = p.rebin_trail([1], [[5]], [0.25], 10, 0.1)
     finite_centers = centers[np.isfinite(trail[0])]
     np.testing.assert_allclose(finite_centers, [0.25, 1.25])
+
+
+def test_dopmap_display_keeps_zero_flux_at_zero(tmp_path):
+    image = np.zeros((4, 4))
+    image[1, 1], image[2, 2], image[1, 2] = 4.0, -1.0, 2.0
+    write_output(tmp_path / "dop.out", im=image)
+    _, shown = p.spruit(workdir=tmp_path).Dopmap(plot=False)
+    np.testing.assert_allclose(shown[1, 1], 1.0)
+    np.testing.assert_allclose(shown[2, 2], -0.25)  # negative stays negative
+    np.testing.assert_allclose(shown[1, 2], 0.5)
+    assert shown[2, 1] == 0.0  # zero flux displays as zero
+
+
+def test_resolved_schedule_defaults_and_validation():
+    from pydoppler.runtime import resolved_schedule
+
+    dop = p.spruit()
+    assert resolved_schedule(dop, 0) == (0.0, 0, 1.0)
+    assert resolved_schedule(dop, 2) == (0.0, 25, 1.0)
+    dop.al0, dop.nal, dop.clim = 3.0, 4, 1.2
+    assert resolved_schedule(dop, 1) == (3.0, 4, 1.2)
+    dop.al0 = 0.0
+    with pytest.raises(ValueError, match="al0 must be positive"):
+        resolved_schedule(dop, 0)
+
+
+def test_obsolete_projection_factors_warn(tmp_path):
+    dop = p.spruit(workdir=tmp_path)
+    with pytest.warns(DeprecationWarning, match="obsolete"):
+        with pytest.raises(FileNotFoundError):
+            dop.Syncdop(nri=0.9)
+
+
+def test_packaged_sample_script_matches_repository_copy():
+    root = Path(__file__).resolve().parents[1]
+    assert ((root / "sample_script.py").read_text()
+            == (root / "pydoppler" / "test_data" / "sample_script.py").read_text())

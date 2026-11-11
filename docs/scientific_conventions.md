@@ -39,16 +39,20 @@ changes diagnostic plots only. Display binning computes periodic interval
 overlaps, including exposures longer than one display bin.
 
 The forward model integrates each exposure with midpoint quadrature. Its
-automatic sampling resolves the largest projected velocity excursion to
-approximately one eighth of the smaller of a map pixel and spectral channel;
-`phase_subsamples` can impose a larger minimum. Verify quadrature convergence
-for especially demanding data. `instrument_sigma` is the Gaussian line-spread
-function **standard deviation in km/s**, with zero meaning no instrumental
-broadening; `FWHM = sqrt(8 ln 2) * sigma`. The map pixel response is a
-normalized triangular kernel integrated over spectral-channel edges and
-convolved with this Gaussian. This is a discretization convention, not an
-exact projection of a uniform square pixel. The current LSF is constant
-across wavelength and exposure.
+automatic sampling places about three samples per smaller of a map pixel and
+spectral channel along the largest projected velocity excursion; in tests
+this keeps the error below about 0.05% of a pixel's peak response.
+`phase_subsamples` can impose a larger minimum. `instrument_sigma` is the
+Gaussian line-spread function **standard deviation in km/s**, with zero
+meaning no instrumental broadening; `FWHM = sqrt(8 ln 2) * sigma`. Each map
+pixel is a uniform square in velocity space. Its exact line-of-sight
+projection at phase `phi` is a trapezoid (two boxes of half-widths
+`dv |sin 2 pi phi| / 2` and `dv |cos 2 pi phi| / 2` convolved), integrated over
+spectral-channel edges and convolved with the Gaussian LSF. Adjacent pixels
+therefore tile exactly at every phase. (The original code used a triangular
+pixel response of one pixel width, which does not tile and produced up to
+50% ripple in projected smooth maps near phases 0, 0.25, 0.5 and 0.75.) The
+LSF is constant across wavelength and exposure.
 
 `pb0,pb1` define a periodically repeated, open phase-exclusion interval, with
 `0 <= pb1-pb0 < 1`. Equal endpoints exclude nothing; `.95,1.05` excludes the
@@ -106,7 +110,8 @@ underdetermined continuum cannot supply an error estimate and raises an error.
 
 For a statistical fit, set `iw=1` **before** calling `Dopin()`. With the default
 `covariance_mode="full"`, `Syncdop()` uses the prepared full covariance (backend
-mode `iw=2`) and a Gaussian objective, regardless of the legacy `ih` setting.
+mode `iw=2`) and a Gaussian objective, regardless of the `ih` setting. The
+precision matrices are passed to the solver in a binary file.
 For residual `r_p = y_p - model_p` in unmasked spectrum `p`,
 
 ```text
@@ -124,8 +129,10 @@ exposures are assumed independent. Cross-exposure calibration errors and
 uncertainty in gamma, phase, rest wavelength, and the LSF are not included.
 
 `covariance_mode="diagonal"` deliberately approximates prepared channels as
-independent and uses `sum((r/sigma)^2)`. It is cheaper but can overstate the
-information in resampled data. `Residuals()` returns `r/sigma` when actual
+independent and uses `sum((r/sigma)^2)`. It overstates the information in
+resampled data: on the bundled U Gem spectra it reaches a given RMS target
+only with much weaker regularization and visibly noisier maps than the
+full-covariance fit. `Residuals()` returns `r/sigma` when actual
 fitted errors are available, otherwise its second return value is `None`.
 For a full-covariance run, `Residuals(whiten=True)` returns
 `U Lambda^(-1/2) U^T r`. Its squared norm is `Q_data`. For rank-deficient
@@ -138,13 +145,17 @@ Regularization makes an effective number of fitted parameters nontrivial.
 An RMS near one can be useful under an adequate Gaussian model, but does not
 establish feature significance or model adequacy.
 
-The compatibility default `iw=0` has no measurement-noise interpretation.
-Its stopping statistic is
-`sqrt(sum(r^2)/sum(y^2))` over unmasked data. With `ih=1` it minimizes unweighted
-squared residuals; with legacy `ih=0` it uses a positive log objective after a
-baseline shift. That objective is not a Poisson likelihood for calibrated or
-continuum-subtracted flux. Use the weighted Gaussian mode for quantitative
-statistical work.
+The default `iw=0` has no measurement-noise interpretation. Its statistic is
+the relative RMS residual `sqrt(sum(r^2)/sum(y^2))` over unmasked data, so a
+zero map scores exactly 1 and the default `clim=1` only requires the map to
+explain part of the data. With the default `ih=1` the objective is
+`H = -sum(r^2) / (2 nvp)` in units of the RMS flux; legacy `ih=0` uses
+`H = sum(y log m - m) / nvp` after a baseline shift. That objective is not a
+Poisson likelihood for calibrated or continuum-subtracted flux. The division
+by the number of spectral channels `nvp` restores the original code's
+normalization, so `alpha` does not depend on spectral sampling and the
+historical `al0=0.002` keeps its meaning. Use the weighted Gaussian mode for
+quantitative statistical work.
 
 The optimized objective is `H + alpha*S`. For the positive latent map `x`
 and its smoothed floating default `chi = W x`,
@@ -162,10 +173,17 @@ the optional smoothing of a displayed map.
 
 A projected flat-map baseline is added internally so signed measurements can
 be handled with a positive latent map. It is subtracted from both the returned
-map and reconstruction. `baseline_fraction` (default 0.1 of internally scaled
-flux) sets a minimum; the solver raises it when needed to accommodate negative
-samples. This affects the entropy prior and is not a physical continuum model.
-Returned map values can consequently be negative. The legacy `af,wid`
+map and reconstruction. Its level is `baseline_fraction` (default 0.1) of the
+internal RMS flux scale at the projected peak. In least-squares and Gaussian
+fits this level is fixed, so the returned map is bounded below by minus the
+baseline map (about -2% of the peak for the bundled data) and positivity
+remains an effective constraint. The legacy log objective `ih=0` needs
+positive shifted data, so it raises the level until every unmasked sample is
+positive; a single negative noise excursion can then lift the baseline far
+above the line flux and the map loses positivity. `dop.status` records the
+level used (`baseline`, `baseline_raised`) and `Syncdop()` warns when it was
+raised. The baseline affects the entropy prior and is not a physical
+continuum model. The legacy `af,wid`
 absorption prescription is empirical; the default `af=0` disables it.
 
 The optimizer uses positivity-preserving, preconditioned gradient steps with
@@ -184,17 +202,33 @@ the requested RMS target. This tests numerical stationarity in the scaled
 coordinates, not scientific identifiability or the significance of faint
 pixels. It never relaxes `ac` or accepts an iteration limit as convergence.
 A failed run raises and cannot be displayed as a successful
-managed output. Increasing `nim` can help a slow fit; an infeasible `clim`,
-poor coverage, an inappropriate model, or excessive regularization requires
-scientific reconsideration. `al0` sets the initial entropy weight; positive
-`nal` permits that many values, successively divided by `alf`. With `nal=0`
-only the first value is tried. The first converged fit meeting `clim` is used;
-this schedule is not evidence optimization or posterior inference.
+managed output. Each accepted line-search point's projection, likelihood and
+entropy are reused by the next iteration.
+
+The alpha schedule starts at `al0`. With `al0=None` the solver uses
+`0.002 * nvp * I`, where `I` is the mean per-channel information (the
+likelihood curvature `1/sigma^2` in RMS-flux units, scaled by `1/nvp` for
+unweighted fits): exactly 0.002 for unweighted fits and the equivalent
+regularization for Gaussian fits. Alpha is divided by `alf` for up to `nal`
+steps (`None`: 0 extra steps unweighted, 25 weighted), each warm-started from
+the previous map, until the RMS statistic meets `clim` (`None`: 1). A crossing
+is refined by bisection in `log(alpha)`, starting each trial from the
+smoother bracketing map, until the statistic lies within 0.5% below `clim`,
+so the accepted map is close to the most regularized one meeting the target.
+The schedule stops early when the statistic stops improving (less than 0.1%
+per step) or when two consecutive shrinking improvements extrapolate
+geometrically, using the slower rate, to a floor above `clim`; the error
+message and `rms_floor_estimate` report that floor. This is a discrepancy-
+principle schedule, not evidence optimization or posterior inference.
+
 In `dop.status`, the legacy-named `optimizer_status` is a combined status:
-0 means success, 1 means the optimizer converged but the alpha schedule missed
-the target, 11 means iteration limit, 12 means line-search failure, 13 means
-nonfinite objective, and 19 means nonfinite fit statistic. The overall
-`converged` flag is one only when both optimization and target checks succeed.
+0 means success, 1 means the optimizer converged but the target was not met
+(`rms_plateau=1` when the statistic levelled off), 11 means iteration limit,
+12 means line-search failure, 13 means nonfinite objective, and 19 means
+nonfinite fit statistic. The overall `converged` flag is one only when both
+optimization and target checks succeed. `target_bracketed=0` with a schedule
+means the first alpha already met the target; `Syncdop()` then warns that a
+larger `al0` could give a smoother map.
 
 `norm=0` preserves phase-dependent line flux and is the default. Opt-in
 `norm=1` rescales each included spectrum to their mean line integral. In a
@@ -211,9 +245,13 @@ bin edges, phases increasing upwards, and a shared data-derived scale for
 input/reconstructed trails. This makes an amplitude error visible.
 `Dopmap()` returns its processed, normalized display array, including requested
 radial-mean removal, Gaussian smoothing, or sign reversal; samples outside
-circular support are NaN. Ordinary maps are scaled to [0,1]; radial-mean
-subtracted maps are scaled by their absolute maximum. The raw solver map is
-available through the output parser; use it for physical map intensities.
+circular support are NaN. Ordinary maps are divided by their positive peak,
+so zero flux remains zero and any negative values remain negative (earlier
+versions rescaled minimum-to-maximum, which placed zero flux part-way up the
+colour scale); default limits are 0 and the 99.5th percentile. Radial-mean
+subtracted maps are scaled by their absolute maximum with symmetric limits.
+The raw solver map is available through the output parser; use it for
+physical map intensities.
 
 Raw map-density units from the updated solver are **input spectral-density
 units per km/s**; older `dop.out` files may use the former conversion and must
@@ -238,7 +276,10 @@ point-mass, circular-binary overlays.
 ## Reproducibility, tests, and limits
 
 `Syncdop()` hashes sources, compiler identity, and the executable to cache the
-build, then **executes every requested inversion**. A work-directory lock
+build, then **executes every requested inversion**. All solver arrays are
+allocated at run time with a sparse, exactly sized projection, so one
+executable serves every data and map size and memory scales with the number
+of nonzero projection weights. A work-directory lock
 prevents concurrent collisions. `dopin.json` records continuum settings, noise
 recipes, and hashes of the actual input arrays. `run.json` includes matching
 preprocessing metadata, parameters, hashes, diagnostics, and success/failure;
@@ -246,32 +287,35 @@ it explicitly marks preprocessing metadata unavailable when manual input edits
 break that association. These records do not replace upstream calibration or
 ephemeris provenance. `dop.status` records convergence. Managed
 plots reject unsuccessful or modified output. A memory estimate is checked
-before dense covariance preparation; `max_memory_bytes` and `run_timeout`
+before projection and dense covariance preparation; `max_memory_bytes` and `run_timeout`
 bound individual runs. Refresh old working directories explicitly with
 `copy_fortran_code(workdir, overwrite=True)`; the default installer preserves
 existing files.
 
 The automated suite includes independent variance/covariance calculations,
 Monte Carlo propagation through continuum subtraction, finite-difference
-objective derivatives, projection-adjoint checks, excluded-phase corruption,
+objective derivatives, projection-adjoint checks, exact square-pixel
+projection at a cardinal phase, alpha-schedule bracketing and plateau
+detection, excluded-phase corruption,
 intentional nonconvergence, run/cache provenance, and analytic S-wave recovery
 in all four map quadrants. Injection tests cover both signs of gamma and
 flux/error scaling by `1e-15`. Geometry checks cover phase wraps, exposure
-overlaps, map centers, equal-mass Roche geometry, and projected resonances.
+overlaps, map centers, Roche geometry (including equal masses), and projected
+resonances.
 
-The bundled unweighted U Gem example converges and its figures have been
-regenerated. A separate full-covariance experiment on those real spectra
-exposes a remaining practical limitation: a 144-by-144 map with the legacy
-weak entropy weight `al0=0.002` did not reach stationarity in 1000 iterations.
-Stronger weights 0.2 and 1 also exhausted a 3000-iteration budget. Coarser
-32-by-32 and 48-by-48 maps reached the unchanged stationarity tolerance, but
-their RMS values were 1.281 and 1.147, respectively, so a requested target of
-1.0 was correctly rejected. These tests used continuum-estimated errors,
-`norm=0`, and all phases, including eclipse phases. They do not establish the
-adequacy of that noise model or the stationary-emission assumption for U Gem.
-Map resolution, physical phase selection, noise assumptions, regularization,
-and iteration budget require data-specific checks. Increasing a target merely
-to suppress an error does not validate a reconstruction.
+The bundled U Gem example uses the phase file's 600 s exposure widths
+(0.0393 cycles; Echevarria et al. 2007). The unweighted default fit converges
+at alpha 0.002 with a relative RMS of 0.236 and a smooth map whose minimum is
+about -2% of the peak. With continuum-estimated errors and full covariance,
+targets of 1.3 and 1.2 are reached at alpha 21 and 1.1 (all phases, `norm=0`,
+144 x 144 map). The statistic levels off near 1.07, so a target of 1.0 is
+correctly reported as unattainable; the continuum-residual noise estimate is
+about 8% below the scatter of line-free channels, which accounts for most of
+that excess. These results do not establish the adequacy of that noise model
+or the stationary-emission assumption for U Gem. Map resolution, physical
+phase selection, noise assumptions, regularization, and iteration budget
+require data-specific checks. Increasing a target merely to suppress an error
+does not validate a reconstruction.
 
 These are regression and numerical validation checks, not a proof that every
 dataset is identifiable. For scientific use, vary the continuum bands,
