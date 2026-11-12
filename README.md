@@ -1,18 +1,18 @@
 # PyDoppler
 
-PyDoppler is a Python interface to Henk Spruit's floating-default
+PyDoppler is a Python implementation of Henk Spruit's floating-default
 maximum-entropy Doppler tomography. It turns phase-resolved spectra of a
 single emission line into trailed spectra, a Doppler tomogram and a
 reconstructed trail, with input validation, noise propagation and run
 provenance.
 
-The Fortran solver descends from Spruit's 1999 code and has since been
+The solver descends from Spruit's 1999 Fortran code and has since been
 revised:
 
 - **Forward model:** an exact square-pixel projection, with exposure smearing and an optional Gaussian line-spread function.
 - **Likelihoods:** Gaussian likelihoods with diagonal or full noise covariance.
 - **Regularization:** an alpha schedule that brackets the RMS target and refines it by bisection.
-- **Storage:** arrays are allocated at run time, so one executable serves every problem size.
+- **Implementation:** NumPy and SciPy only, so no compiler is needed. It reproduces the earlier Fortran solver to rounding accuracy.
 
 <p align="middle">
    <img src="https://raw.githubusercontent.com/fcotizelati/pydoppler/master/docs/readme_images/Doppler_Map.svg" alt="Doppler tomogram of U Gem with Roche-lobe and stream overlays" width="520" />
@@ -36,8 +36,7 @@ revised:
 Requirements:
 
 - Python 3.9 or newer.
-- NumPy and Matplotlib.
-- `make` and `gfortran`, which compile the solver on first use. On macOS use `brew install gcc`; on Debian or Ubuntu use `apt install gfortran`.
+- NumPy, SciPy and Matplotlib.
 
 Install this version from GitHub:
 
@@ -55,8 +54,7 @@ from pathlib import Path
 
 import pydoppler
 
-workdir = Path.cwd() / "pydoppler-workdir"   # solver build and all outputs
-pydoppler.copy_fortran_code(workdir)
+workdir = Path.cwd() / "pydoppler-workdir"   # solver input and all outputs
 pydoppler.copy_test_data(workdir)             # bundled U Gem spectra
 
 dop = pydoppler.spruit(workdir=workdir)
@@ -68,7 +66,7 @@ dop.overs = 0.3
 dop.Foldspec()                                     # read spectra and phases
 dop.Dopin(continuum_band=[6500, 6537, 6591, 6620],
           use_list_dpha=True, plot=False)          # continuum-subtract, write input
-dop.Syncdop()                                      # compile once, run, validate
+dop.Syncdop()                                      # run the inversion, validate
 _, tomogram = dop.Dopmap(plot=False)               # map / peak; NaN outside support
 ```
 
@@ -112,7 +110,6 @@ Each has an effective 600 s exposure, which is 0.0393 cycles. Copy them with
 
 ```python
 dop = pydoppler.spruit(workdir="pydoppler-workdir")
-pydoppler.copy_fortran_code(dop.workdir)
 dop.object = "U Gem"
 dop.base_dir = "ugem99"
 dop.list = "ugem0all.fas"
@@ -151,9 +148,8 @@ frame.
 diagnostics = dop.Syncdop()
 ```
 
-The solver is compiled on the first call and cached by source and compiler
-hashes; every call runs the inversion. A run counts as successful only if both
-of these hold:
+Every call runs the inversion. A run counts as successful only if both of
+these hold:
 
 - the optimizer converged;
 - the RMS statistic met the target `clim`.
@@ -282,6 +278,7 @@ parameters) or `Syncdop()` (solver parameters).
 | `af`, `wid` | 0, 10e5 | Empirical central-absorption prescription (amplitude, cm/s); 0 disables |
 | `nbins` | 20 | Phase bins for diagnostic plots only |
 | `run_timeout`, `max_memory_bytes` | 600 s, 2 GB | Resource limits per run |
+| `threads` | `None` | Threads that build the projection; `None` uses up to four. The result does not depend on it |
 
 ## Conventions in brief
 
@@ -316,13 +313,15 @@ All files are written to `dop.workdir`:
 | `dop.out` | Map and data/model trails |
 | `dop.status` | Convergence, RMS statistic, alpha, baseline |
 | `dop.log` | Iteration log |
-| `run.json` | Input, source, binary and output hashes, and success flag |
+| `run.json` | Input, output and solver-source hashes, library versions, and success flag |
 
 `Dopmap()` and `Reco()` refuse outputs that are missing from a successful
 `run.json`. A lock file prevents two runs from sharing a directory.
 
-Directories created by older versions contain the previous fixed-size solver.
-Refresh them with `pydoppler.copy_fortran_code(workdir, overwrite=True)`.
+Earlier versions compiled a Fortran solver in the run directory. Scripts
+written for them should drop the `pydoppler.copy_fortran_code()` call, which no
+longer exists. The Fortran sources, the `dopp` executable and `dop.precision`
+left in old run directories are ignored and can be deleted.
 
 To regenerate the README figures, run `python docs/make_readme_figures.py`.
 

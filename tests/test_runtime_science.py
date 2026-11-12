@@ -1,7 +1,6 @@
 """End-to-end checks of covariance, provenance snapshots, and allocation limits."""
 
 import json
-import shutil
 
 import numpy as np
 import pytest
@@ -12,7 +11,6 @@ from pydoppler.pydoppler import _parse_dopout
 
 
 def _prepared(dopdir):
-    pydoppler.copy_fortran_code(dopdir)
     dop = pydoppler.spruit(workdir=dopdir)
     dop.verbose = False
     dop.iw = 1
@@ -36,8 +34,6 @@ def _prepared(dopdir):
     return dop
 
 
-@pytest.mark.skipif(not shutil.which("make") or not shutil.which("gfortran"),
-                    reason="Fortran toolchain required")
 def test_full_covariance_run_matches_independent_residual_statistic_and_snapshots(tmp_path):
     dop = _prepared(tmp_path)
     diagnostics = dop.Syncdop()
@@ -70,7 +66,6 @@ def test_full_covariance_run_matches_independent_residual_statistic_and_snapshot
 def test_memory_limit_is_checked_before_dense_covariance_preparation(tmp_path, monkeypatch):
     dop = _prepared(tmp_path)
     dop.max_memory_bytes = 1
-    monkeypatch.setattr(runtime.shutil, "which", lambda name: "/available/" + name)
 
     def forbidden_dense():
         raise AssertionError("Dense covariance was allocated before the memory guard.")
@@ -78,17 +73,14 @@ def test_memory_limit_is_checked_before_dense_covariance_preparation(tmp_path, m
     monkeypatch.setattr(dop.normalised_flux_covariance[0], "to_dense", forbidden_dense)
     with pytest.raises(MemoryError, match="before preparation"):
         dop.Syncdop()
-    assert not (tmp_path / "dop.precision").exists()
     assert not json.loads((tmp_path / "run.json").read_text())["success"]
 
 
-def test_weighted_data_normalization_requires_explicit_conditional_assumption(tmp_path, monkeypatch):
+def test_weighted_data_normalization_requires_explicit_conditional_assumption(tmp_path):
     dop = _prepared(tmp_path)
     dop.norm = 1
-    monkeypatch.setattr(runtime.shutil, "which", lambda name: "/available/" + name)
     with pytest.raises(ValueError, match="conditional_normalization"):
         dop.Syncdop()
-    assert not (tmp_path / "dop.precision").exists()
     dop.conditional_normalization = True
     parameters = runtime._parameters(dop, effective_iw=2)
     assert "opt-in flat integrated flux normalization" in parameters
@@ -117,8 +109,6 @@ def test_preprocessing_provenance_matches_actual_arrays_and_rejects_changed_inpu
     assert "changed" in unavailable["reason"]
 
 
-@pytest.mark.skipif(not shutil.which("make") or not shutil.which("gfortran"),
-                    reason="Fortran toolchain required")
 def test_diagonal_manual_input_does_not_reuse_stale_preparation_covariance(tmp_path):
     dop = _prepared(tmp_path)
     phases, widths, velocity, flux, sigma = runtime.read_input(tmp_path / "dopin", weighted=True)
@@ -142,8 +132,6 @@ def test_diagonal_manual_input_does_not_reuse_stale_preparation_covariance(tmp_p
         dop.Residuals(whiten=True)
 
 
-@pytest.mark.skipif(not shutil.which("make") or not shutil.which("gfortran"),
-                    reason="Fortran toolchain required")
 def test_four_quadrant_spots_gamma_sign_and_physical_flux_units(tmp_path):
     """Inject analytic S-waves, without using the backend's projection matrix."""
     dop = _prepared(tmp_path)
@@ -156,13 +144,12 @@ def test_four_quadrant_spots_gamma_sign_and_physical_flux_units(tmp_path):
     phases = np.arange(12) / 12 + .013
     baseline_map = None
     baseline_statistic = None
-    binary_mtime = None
     cases = [(150., 220., 90., 1.), (-150., 220., -120., 1.),
              (-150., -220., 65., 1.), (150., -220., -80., 1.),
              (150., 220., 90., 1e-15)]
     for vx, vy, gamma, flux_scale in cases:
-        # Public phase convention, independent of both Python and Fortran
-        # internal map-axis layout. Positive gamma redshifts wavelengths.
+        # Public phase convention, independent of the solver's internal
+        # map-axis layout. Positive gamma redshifts wavelengths.
         center = -vx * np.cos(2 * np.pi * phases) + vy * np.sin(2 * np.pi * phases)
         redshift = np.sqrt((1. + gamma / light_speed) / (1. - gamma / light_speed))
         dop.wave = [rest_wave * redshift]
@@ -189,13 +176,9 @@ def test_four_quadrant_spots_gamma_sign_and_physical_flux_units(tmp_path):
         map_pixel = output.vmap[1] - output.vmap[0]
         np.testing.assert_allclose(recovered, [vx, vy], rtol=0, atol=map_pixel / 2.)
         np.testing.assert_array_equal(np.sign(recovered), np.sign([vx, vy]))
-        current_mtime = (tmp_path / "dopp").stat().st_mtime_ns
-        if binary_mtime is None:
-            binary_mtime = current_mtime
+        if baseline_map is None:
             baseline_map = output.im.copy()
             baseline_statistic = diagnostics["fit_statistic"]
-        else:
-            assert current_mtime == binary_mtime  # Same dimensions reuse the executable.
         if flux_scale != 1.:
             assert diagnostics["fit_statistic"] == pytest.approx(baseline_statistic, rel=1e-5)
             np.testing.assert_allclose(output.im / flux_scale, baseline_map,

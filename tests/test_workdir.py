@@ -15,7 +15,7 @@ def test_set_workdir_updates_base_and_creates_directory(tmp_path: Path):
 
     run_dir = dop.make_run_dir(prefix="run")
     assert run_dir == (new_base / "run").resolve()
-    assert (run_dir / "dop.f90").is_file()
+    assert run_dir.is_dir() and not any(run_dir.iterdir())
 
 
 def test_make_run_dir_creates_unique_directories(tmp_path: Path):
@@ -24,9 +24,10 @@ def test_make_run_dir_creates_unique_directories(tmp_path: Path):
 
     run1 = dop.make_run_dir(prefix="run")
     assert run1 == (base / "run").resolve()
-    assert (run1 / "makefile").is_file()
+    assert run1.is_dir()
 
     run2 = dop.make_run_dir(prefix="run")
     assert run2 == (base / "run-1").resolve()
-    assert (run2 / "dop.f90").is_file()
+    assert run2.is_dir()
+    assert dop.workdir == run2
 

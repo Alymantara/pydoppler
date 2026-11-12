@@ -1,4 +1,4 @@
 include docs/scientific_conventions.md docs/make_readme_figures.py
 recursive-include docs/readme_images *.svg *.json
-recursive-include tests *.py
+recursive-include tests *.py *.npz
 include sample_script.py

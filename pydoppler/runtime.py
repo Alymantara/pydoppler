@@ -1,28 +1,22 @@
-"""Validated, provenance-tracked execution of the standalone tomography solver."""
+"""Validated, provenance-tracked execution of the tomography solver."""
 
 from __future__ import annotations
 
-import hashlib
 import copy
+import hashlib
 import json
 import logging
 import os
-import shutil
-import subprocess
+import platform
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
+import scipy
 
-
-def phase_mask(phases, start, stop):
-    """Valid phases outside the open, periodically repeated exclusion interval."""
-    if not np.isfinite([start, stop]).all() or not 0 <= stop - start < 1:
-        raise ValueError("Phase exclusion must satisfy 0 <= pb1 - pb0 < 1 cycle.")
-    distance = np.mod(np.asarray(phases, dtype=float) - start, 1.0)
-    edge = 16 * np.finfo(float).eps
-    return ~((distance > edge) & (distance < stop - start - edge))
+from . import solver
+from .solver import phase_mask  # noqa: F401  (part of this module's interface)
 
 
 def covariance_modes(covariance, rcond=1e-10):
@@ -134,7 +128,7 @@ def read_input(path, weighted=False):
     if vp.size != nvp or np.any(np.diff(vp) <= 0):
         raise ValueError("Velocity samples must be strictly increasing.")
     if not np.allclose(np.diff(vp), np.diff(vp)[0], rtol=5e-5, atol=0):
-        raise ValueError("The Fortran backend requires uniformly spaced velocities.")
+        raise ValueError("The solver requires uniformly spaced velocities.")
     flux = values[index:index + nph * nvp].reshape(nvp, nph)
     sigma = None
     if weighted:
@@ -144,50 +138,49 @@ def read_input(path, weighted=False):
     return phases, widths, vp, flux, sigma
 
 
-def write_precision_header(handle, nph, nvp):
-    """Binary ``dop.precision``: little-endian int32 (nph, nvp), then blocks."""
-    np.asarray([nph, nvp], dtype="<i4").tofile(handle)
-
-
-def write_precision_block(handle, rank, precision):
-    """One spectrum: int32 covariance rank, then the column-major float64 matrix."""
-    np.asarray([rank], dtype="<i4").tofile(handle)
-    np.asarray(precision, dtype="<f8").ravel(order="F").tofile(handle)
-
-
 def _prepare_precision(dop, flux, sigma):
+    """Precision matrices of the covariance prepared by ``Dopin()``.
+
+    Returns ``(effective_iw, precision, ranks, sha256)``. The arrays and their
+    digest are ``None`` unless the fit uses the full covariance; ``precision``
+    then has shape ``(nph, nvp, nvp)``.
+    """
     mode = dop.covariance_mode
     if mode not in ("full", "diagonal"):
         raise ValueError("covariance_mode must be 'full' or 'diagonal'.")
     covariances = getattr(dop, "normalised_flux_covariance", None)
     if dop.iw == 0 or (dop.iw == 1 and mode == "diagonal"):
-        (dop.workdir / "dop.precision").unlink(missing_ok=True)
-        return int(dop.iw)
+        return int(dop.iw), None, None, None
     if covariances is None:
         if dop.iw == 2:
             raise ValueError("iw=2 requires the covariance prepared by Dopin().")
-        return 1
+        return 1, None, None, None
     if len(covariances) != flux.shape[1]:
         raise ValueError("Prepared covariance does not match dopin; rerun Dopin().")
     prepared = np.asarray(dop.normalised_flux, dtype=float).T
     if prepared.shape != flux.shape or not np.allclose(prepared, flux, rtol=1e-10, atol=0):
         raise ValueError("dopin differs from the covariance's flux data; rerun Dopin().")
-    ranks = []
-    path = dop.workdir / "dop.precision"
-    with path.open("wb") as handle:
-        write_precision_header(handle, flux.shape[1], flux.shape[0])
-        for index, covariance in enumerate(covariances):
-            diagonal = np.asarray(covariance.diagonal(), dtype=float)
-            if not np.allclose(diagonal, sigma[:, index] ** 2, rtol=1e-9, atol=0):
-                raise ValueError("Prepared covariance and dopin uncertainties differ.")
-            values, vectors = covariance_modes(covariance, dop.covariance_rcond)
-            precision = (vectors / values) @ vectors.T
-            if not np.isfinite(precision).all():
-                raise ValueError("Precision matrix overflow; change the flux units.")
-            ranks.append(len(values))
-            write_precision_block(handle, len(values), precision)
-    dop.covariance_ranks = np.asarray(ranks)
-    return 2
+    nvp, nph = flux.shape
+    precision = np.empty((nph, nvp, nvp))
+    ranks = np.empty(nph, dtype=int)
+    # The digest covers the byte layout of the former ``dop.precision`` file
+    # (little-endian sizes, then each rank and column-major matrix), so it
+    # stays comparable with ``run.json`` records of earlier versions.
+    digest = hashlib.sha256(np.asarray([nph, nvp], dtype="<i4").tobytes())
+    for index, covariance in enumerate(covariances):
+        diagonal = np.asarray(covariance.diagonal(), dtype=float)
+        if not np.allclose(diagonal, sigma[:, index] ** 2, rtol=1e-9, atol=0):
+            raise ValueError("Prepared covariance and dopin uncertainties differ.")
+        values, vectors = covariance_modes(covariance, dop.covariance_rcond)
+        block = (vectors / values) @ vectors.T
+        if not np.isfinite(block).all():
+            raise ValueError("Precision matrix overflow; change the flux units.")
+        precision[index] = block
+        ranks[index] = len(values)
+        digest.update(np.asarray([len(values)], dtype="<i4").tobytes())
+        digest.update(np.asarray(block, dtype="<f8").tobytes(order="F"))
+    dop.covariance_ranks = ranks
+    return 2, precision, ranks, digest.hexdigest()
 
 
 DEFAULT_GAUSSIAN_ALPHA_STEPS = 25
@@ -196,7 +189,7 @@ DEFAULT_GAUSSIAN_ALPHA_STEPS = 25
 def resolved_schedule(dop, effective_iw):
     """Return (al0, nal, clim) with ``None`` defaults resolved for the mode.
 
-    ``al0=None`` is written as 0, which the solver replaces by the legacy
+    ``al0=None`` is passed as 0, which the solver replaces by the legacy
     weight 0.002 per unit of mean channel information: exactly 0.002 for
     unweighted fits and the equivalent regularization for Gaussian fits.
     ``nal=None`` gives a single alpha for unweighted fits and a decreasing,
@@ -213,7 +206,8 @@ def resolved_schedule(dop, effective_iw):
     return al0, nal, clim
 
 
-def _parameters(dop, effective_iw, map_size=4):
+def _settings(dop, effective_iw, map_size=4):
+    """Validated solver settings, in the solver's units (velocities in cm/s)."""
     al0, nal, clim = resolved_schedule(dop, effective_iw)
     numbers = [dop.ac, dop.alf, clim, dop.wid, dop.af,
                dop.instrument_sigma, dop.baseline_fraction, dop.overs]
@@ -239,26 +233,41 @@ def _parameters(dop, effective_iw, map_size=4):
             or dop.run_timeout <= 0 or dop.max_memory_bytes <= 0
             or not 0 < dop.covariance_rcond < 1):
         raise ValueError("Invalid execution limit or covariance eigenvalue threshold.")
-    for name, value in (("ns", dop.ns), ("nim", dop.nim), ("nal", nal), ("ipri", dop.ipri)):
+    if dop.threads is not None and (int(dop.threads) != dop.threads or dop.threads < 1):
+        raise ValueError("threads must be a positive integer, or None for the default.")
+    for name, value in (("ns", dop.ns), ("nim", dop.nim), ("nal", nal)):
         if int(value) != value:
             raise ValueError(f"{name} must be an integer.")
     if int(nal) < 0:
         raise ValueError("nal must be a nonnegative integer.")
+    return dict(
+        ih=1 if effective_iw else int(dop.ih), iw=int(effective_iw),
+        pb0=float(dop.pb0), pb1=float(dop.pb1), ns=int(dop.ns), ac=float(dop.ac),
+        nim=int(dop.nim), al0=al0, alf=float(dop.alf), nal=int(nal), clim=clim,
+        norm=int(dop.norm), wid=float(dop.wid), af=float(dop.af),
+        instrument_sigma=float(dop.instrument_sigma) * 1e5,
+        phase_subsamples=int(dop.phase_subsamples),
+        baseline_fraction=float(dop.baseline_fraction), map_size=int(map_size),
+    )
+
+
+def _parameters(dop, effective_iw, map_size=4):
+    """The ``dop.in`` record of the validated solver settings."""
+    s = _settings(dop, effective_iw, map_size)
     lines = [
-        f"{1 if effective_iw else int(dop.ih)}    ih (0=positive log objective, 1=least squares)",
-        f"{effective_iw}    iw (0=unweighted, 1=diagonal, 2=full covariance)",
-        f"{dop.pb0:.16e} {dop.pb1:.16e}    excluded open phase interval",
-        f"{int(dop.ns)}    default-map smearing pixels",
-        f"{dop.ac:.16e}    convergence tolerance",
-        f"{int(dop.nim)}    maximum iterations per alpha",
-        f"{al0:.16e} {dop.alf:.16e} {int(nal)}    alpha start (0=automatic), divisor, steps",
-        f"{clim:.16e}    RMS target (not reduced chi-square)",
-        f"{int(dop.ipri)}    log verbosity",
-        f"{int(dop.norm)}    opt-in flat integrated flux normalization",
-        f"{dop.wid:.16e} {dop.af:.16e}    absorption prescription",
-        f"{dop.instrument_sigma * 1e5:.16e} {int(dop.phase_subsamples)} "
-        f"{dop.baseline_fraction:.16e}    LSF sigma cm/s, phase quadrature, baseline",
-        f"{int(map_size)}    map pixels per axis",
+        f"{s['ih']}    ih (0=positive log objective, 1=least squares)",
+        f"{s['iw']}    iw (0=unweighted, 1=diagonal, 2=full covariance)",
+        f"{s['pb0']:.16e} {s['pb1']:.16e}    excluded open phase interval",
+        f"{s['ns']}    default-map smearing pixels",
+        f"{s['ac']:.16e}    convergence tolerance",
+        f"{s['nim']}    maximum iterations per alpha",
+        f"{s['al0']:.16e} {s['alf']:.16e} {s['nal']}    alpha start (0=automatic), divisor, steps",
+        f"{s['clim']:.16e}    RMS target (not reduced chi-square)",
+        f"{s['norm']}    opt-in flat integrated flux normalization",
+        f"{s['wid']:.16e} {s['af']:.16e}    absorption prescription",
+        f"{s['instrument_sigma']:.16e} {s['phase_subsamples']} "
+        f"{s['baseline_fraction']:.16e}    LSF sigma cm/s, phase quadrature, baseline",
+        f"{s['map_size']}    map pixels per axis",
     ]
     return "\n".join(lines) + "\n"
 
@@ -267,8 +276,8 @@ def projection_memory(vp_kms, widths, nv, instrument_sigma=0.0):
     """Approximate bytes for the solver's sparse projection and work arrays.
 
     Each map pixel and spectrum touch about (projected pixel width + exposure
-    smear + LSF wings) / channel width channels. Every entry needs 12 bytes,
-    and growing the storage can transiently double it.
+    smear + LSF wings) / channel width channels. Every entry needs 12 bytes;
+    the factor two allows for the reserved storage and the threads' work arrays.
     """
     vp_kms = np.asarray(vp_kms, dtype=float)
     va = max(abs(vp_kms[0]), abs(vp_kms[-1]))
@@ -281,27 +290,61 @@ def projection_memory(vp_kms, widths, nv, instrument_sigma=0.0):
     return int(2 * 12 * entries + work)
 
 
-def _command(args, cwd, timeout):
-    try:
-        result = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
-                                check=True, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"Tomography command exceeded {timeout} s: {args[0]}") from exc
-    except subprocess.CalledProcessError as exc:
-        status_path = Path(cwd) / "dop.status"
-        if Path(args[0]).name == "dopp" and status_path.exists():
-            _status(status_path)  # Prefer the scientific failure to a generic exit code.
-        raise RuntimeError(
-            f"Tomography command failed: {' '.join(args)}\n"
-            f"{exc.stdout or ''}\n{exc.stderr or ''}"
-        ) from exc
-    return result
+def solver_identity():
+    """What computed a result: solver source hash and numerical library versions."""
+    return {
+        "backend": "numpy",
+        "source_sha256": _sha(solver.__file__),
+        "python": platform.python_version(),
+        "numpy": np.__version__,
+        "scipy": scipy.__version__,
+    }
+
+
+def _write_status(path, status):
+    Path(path).write_text("".join(f"{key} {value!r}\n" for key, value in status.items()),
+                          encoding="utf-8")
+
+
+def _write_values(handle, values, per_line=6):
+    text = [f"{value:.16e}" for value in np.asarray(values, dtype=float).ravel()]
+    for start in range(0, len(text), per_line):
+        handle.write(" ".join(text[start:start + per_line]) + "\n")
+
+
+def _write_output(path, header, phases, widths, vp, settings, result):
+    """Write ``dop.out``: grids, input trail, map, reconstructed trail, change maps.
+
+    Phases are stored in radians and velocities in cm/s; trails are stored
+    channel by channel (all spectra of the first channel first), and the map
+    with its internal x index varying slowest.
+    """
+    nph, nvp = result.data.shape
+    nv = result.image.shape[0]
+    status = result.status
+    with Path(path).open("w", encoding="utf-8") as handle:
+        handle.write(f"{nph} {nvp} {nv} {header[0]} {result.identification!r}\n")
+        handle.write(f"{header[1]}\n")
+        _write_values(handle, np.asarray(phases) * solver.PI2, 8)
+        handle.write("1\n")
+        _write_values(handle, np.asarray(widths) * solver.PI2, 8)
+        _write_values(handle, vp, 8)
+        _write_values(handle, result.data.T, 8)
+        handle.write(
+            f"{status['likelihood']} {status['weight_mode']} {settings['pb0']!r} "
+            f"{settings['pb1']!r} {settings['ns']} {settings['ac']!r} {status['alpha']!r} "
+            f"{settings['clim']!r} {settings['norm']} {settings['wid']!r} {settings['af']!r}\n")
+        handle.write(f"{nv} {result.va!r} dopmap\n")
+        _write_values(handle, result.image)
+        handle.write(f"{nph * nvp} reconstructed data\n")
+        _write_values(handle, result.model.T)
+        handle.write(f"{nv} 4 change maps\n")
+        _write_values(handle, result.change_maps)
 
 
 def _status(path):
     if not path.exists():
-        raise RuntimeError("Missing dop.status: solver failed or workdir contains old Fortran assets. "
-                           "Refresh them with copy_fortran_code(workdir, overwrite=True).")
+        raise RuntimeError("Missing dop.status: the solver did not complete.")
     result = {}
     for line in path.read_text().splitlines():
         tokens = line.replace("=", " ").split()
@@ -347,9 +390,6 @@ def _status(path):
     return result
 
 
-SOLVER_SOURCES = ("dop_core.f90", "dop.f90", "makefile")
-
-
 def _warn_about_schedule(dop, diagnostics, effective_iw):
     """Log conditions that leave a converged map open to misinterpretation."""
     if diagnostics.get("baseline_raised") == 1:
@@ -366,22 +406,13 @@ def _warn_about_schedule(dop, diagnostics, effective_iw):
 
 
 def run(dop):
-    """Compile by content fingerprint, always execute, then validate the result."""
+    """Execute the inversion, write its outputs, then validate the result."""
     from .pydoppler import _parse_dopout
 
     workdir = Path(dop.workdir)
-    if not (workdir / "dopin").is_file():
-        raise FileNotFoundError(f"Missing {workdir / 'dopin'}; run Dopin() first.")
-    for name in SOLVER_SOURCES:
-        if not (workdir / name).is_file():
-            hint = (" This directory contains the previous fixed-size solver; refresh it with "
-                    "copy_fortran_code(workdir, overwrite=True)."
-                    if (workdir / "dop.f").is_file() else "")
-            raise FileNotFoundError(
-                f"Missing {workdir / name}; install the solver with copy_fortran_code().{hint}")
-    for executable in ("make", "gfortran"):
-        if shutil.which(executable) is None:
-            raise RuntimeError(f"Required executable {executable!r} was not found on PATH.")
+    input_path = workdir / "dopin"
+    if not input_path.is_file():
+        raise FileNotFoundError(f"Missing {input_path}; run Dopin() first.")
     with _run_lock(workdir):
         started = time.time()
         dop.fit_diagnostics = None
@@ -392,7 +423,9 @@ def run(dop):
         (workdir / "run.json").write_text(json.dumps(
             {"started_unix": started, "success": False, "state": "preparing"},
             indent=2) + "\n")
-        phases, widths, vp, flux, sigma = read_input(workdir / "dopin", dop.iw > 0)
+        phases, widths, vp, flux, sigma = read_input(input_path, dop.iw > 0)
+        with input_path.open(encoding="utf-8") as handle:
+            header = (handle.readline().split()[2], handle.readline().strip())
         valid = phase_mask(phases, dop.pb0, dop.pb1)
         if not np.any(valid) or not np.any(flux[:, valid] != 0):
             raise ValueError("There must be nonzero data in at least one unmasked spectrum.")
@@ -407,7 +440,7 @@ def run(dop):
         if not np.isfinite(nv) or int(nv) != nv or nv < 4:
             raise ValueError("map_size must be an integer of at least four pixels.")
         nv = int(nv) + int(nv) % 2
-        _parameters(dop, effective_iw, nv)  # Validate before allocation or serialization.
+        _settings(dop, effective_iw, nv)  # Validate before allocation.
         memory = projection_memory(vp / 1e5, widths, nv, dop.instrument_sigma)
         if full_covariance:
             memory += 8 * len(vp)**2 * (2 * len(phases) + 6)
@@ -417,41 +450,36 @@ def run(dop):
                 "max_memory_bytes before preparation; reduce map_size or the spectral "
                 "window, or increase the limit deliberately."
             )
-        effective_iw = _prepare_precision(dop, flux, sigma)
+        effective_iw, precision, ranks, precision_hash = _prepare_precision(dop, flux, sigma)
         dop.effective_iw = effective_iw
+        settings = _settings(dop, effective_iw, nv)
         parameters = _parameters(dop, effective_iw, nv)
         _write_changed(workdir / "dop.in", parameters)
-        compiler = _command(["gfortran", "--version"], workdir, dop.run_timeout).stdout
         manifest_path = workdir / "run.json"
         manifest = {"started_unix": started, "success": False, "parameters": parameters,
                     "effective_iw": effective_iw, "map_size": nv,
                     "covariance_rcond": dop.covariance_rcond,
-                    "input_sha256": _sha(workdir / "dopin"), "compiler": compiler.splitlines()[0]}
+                    "input_sha256": _sha(input_path), "solver": solver_identity()}
         manifest["preprocessing"] = preprocessing_provenance(workdir, manifest["input_sha256"])
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-        dop.fit_diagnostics = None
         try:
-            source_hashes = {name: _sha(workdir / name) for name in SOLVER_SOURCES}
-            fingerprint = hashlib.sha256(json.dumps(
-                {"sources": source_hashes, "compiler": compiler,
-                 "compiler_path": shutil.which("gfortran")}, sort_keys=True).encode()).hexdigest()
-            build_path = workdir / ".build.json"
-            try:
-                build = json.loads(build_path.read_text())
-            except (OSError, ValueError):
-                build = {}
-            binary = workdir / "dopp"
-            if (build.get("fingerprint") != fingerprint or not binary.exists()
-                    or build.get("binary_sha256") != _sha(binary)):
-                dop._log(logging.INFO, "Compiling tomography solver.")
-                _command(["make", "-B", "dopp"], workdir, dop.run_timeout)
-                build_path.write_text(json.dumps({"fingerprint": fingerprint,
-                                                 "binary_sha256": _sha(binary)}) + "\n")
             for name in ("dop.out", "dop.log", "dop.status", "dop.normalization"):
                 (workdir / name).unlink(missing_ok=True)
-            result = _command([str(binary.resolve())], workdir, dop.run_timeout)
-            if result.stderr:
-                dop._log(logging.DEBUG, result.stderr.rstrip())
+            with (workdir / "dop.log").open("w", encoding="utf-8") as log:
+                try:
+                    result = solver.solve(
+                        phases, widths, vp, flux.T, None if sigma is None else sigma.T,
+                        precision, ranks, threads=dop.threads,
+                        deadline=time.monotonic() + dop.run_timeout,
+                        log=lambda text: log.write(text + "\n"), **settings)
+                except solver.SolverTimeout as exc:
+                    raise RuntimeError(
+                        f"Tomography exceeded the run_timeout of {dop.run_timeout} s.") from exc
+            _write_status(workdir / "dop.status", result.status)
+            (workdir / "dop.normalization").write_text(f"{len(phases)}\n" + "".join(
+                f"{factor!r}\n" for factor in result.normalization.tolist()), encoding="utf-8")
+            if result.converged:
+                _write_output(workdir / "dop.out", header, phases, widths, vp, settings, result)
             diagnostics = _status(workdir / "dop.status")
             output = _parse_dopout(workdir / "dop.out")
             if output.nph != len(phases) or output.nvp != len(vp) or output.nv != nv:
@@ -480,10 +508,10 @@ def run(dop):
             )
             dop._fit_rcond = dop.covariance_rcond
             dop._fit_phase_mask = valid.copy()
-            manifest.update(success=True, diagnostics=diagnostics, source_sha256=source_hashes,
-                            output_sha256=dop._output_hash, binary_sha256=_sha(binary))
+            manifest.update(success=True, diagnostics=diagnostics,
+                            output_sha256=dop._output_hash)
             if effective_iw == 2:
-                manifest["precision_sha256"] = _sha(workdir / "dop.precision")
+                manifest["precision_sha256"] = precision_hash
             dop._log(logging.INFO, f"Converged tomography; RMS statistic={diagnostics['fit_statistic']:.6g}.")
             return diagnostics
         except Exception as exc:

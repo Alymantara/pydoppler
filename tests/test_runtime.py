@@ -1,5 +1,4 @@
 import json
-import shutil
 
 import numpy as np
 import pytest
@@ -74,10 +73,7 @@ def _synthetic_input(dop, scale=1.):
     return flux
 
 
-@pytest.mark.skipif(not shutil.which("gfortran") or not shutil.which("make"),
-                    reason="Fortran toolchain required")
 def test_rapid_rerun_executes_changed_parameters_and_records_failure(tmp_path):
-    pydoppler.copy_fortran_code(tmp_path)
     dop = pydoppler.spruit(workdir=tmp_path)
     dop.verbose = False
     dop.map_size = 20
@@ -90,6 +86,9 @@ def test_rapid_rerun_executes_changed_parameters_and_records_failure(tmp_path):
     dop.Syncdop()
     first = json.loads((tmp_path / "run.json").read_text())
     assert first["success"]
+    assert first["solver"]["backend"] == "numpy"
+    assert len(first["solver"]["source_sha256"]) == 64
+    assert {"python", "numpy", "scipy"} <= set(first["solver"])
     dop.nim = 1
     dop.ac = 1e-12
     with pytest.raises(RuntimeError, match="converge"):
@@ -100,6 +99,39 @@ def test_rapid_rerun_executes_changed_parameters_and_records_failure(tmp_path):
     assert dop.fit_diagnostics is None
     with pytest.raises(RuntimeError):
         dop.Dopmap(plot=False)
+
+
+def test_run_timeout_stops_the_inversion_and_records_failure(tmp_path):
+    dop = pydoppler.spruit(workdir=tmp_path)
+    dop.verbose = False
+    dop.map_size = 20
+    dop.clim = 1.6
+    _synthetic_input(dop)
+    dop.run_timeout = 1e-9
+    with pytest.raises(RuntimeError, match="run_timeout"):
+        dop.Syncdop()
+    manifest = json.loads((tmp_path / "run.json").read_text())
+    assert not manifest["success"]
+    assert not (tmp_path / "dop.out").exists()
+    dop.run_timeout = 600.0
+    assert dop.Syncdop()["converged"] == 1
+
+
+def test_thread_count_is_validated_and_does_not_change_the_map(tmp_path):
+    dop = pydoppler.spruit(workdir=tmp_path)
+    dop.verbose = False
+    dop.map_size = 20
+    dop.clim = 1.6
+    _synthetic_input(dop)
+    dop.threads = 0
+    with pytest.raises(ValueError, match="threads"):
+        dop.Syncdop()
+    maps = []
+    for threads in (1, 3):
+        dop.threads = threads
+        dop.Syncdop()
+        maps.append((tmp_path / "dop.out").read_bytes())
+    assert maps[0] == maps[1]
 
 
 def test_read_input_retains_tiny_physical_flux(tmp_path):

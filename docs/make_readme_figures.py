@@ -19,8 +19,7 @@ OUTDIR = ROOT / "docs" / "readme_images"
 FIGURES = {"Trail": "Trail.svg", "Doppler Map": "Doppler_Map.svg",
            "Reconstruction": "Reconstruction.svg"}
 SOURCES = ("sample_script.py", "pydoppler/pydoppler.py", "pydoppler/preprocessing.py",
-           "pydoppler/runtime.py", "pydoppler/fortran_code/dop_core.f90",
-           "pydoppler/fortran_code/dop.f90")
+           "pydoppler/runtime.py", "pydoppler/solver.py")
 
 
 def sha256(path):

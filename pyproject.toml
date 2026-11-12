@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pydoppler"
 version = "0.4.0"
-description = "A Python wrapper for Henk Spruit's doppler tomography software"
+description = "Maximum-entropy Doppler tomography in Python, after Henk Spruit's code"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
@@ -33,6 +33,7 @@ classifiers = [
 keywords = ["doppler", "tomography", "astronomy", "spectroscopy"]
 dependencies = [
   "numpy>=1.20",
+  "scipy>=1.6",
   "matplotlib>=3.3",
 ]
 
@@ -54,8 +55,6 @@ include = ["pydoppler*"]
 
 [tool.setuptools.package-data]
 pydoppler = [
-  "fortran_code/*",
-  "fortran_code/**/*",
   "test_data/*",
   "test_data/**/*",
 ]

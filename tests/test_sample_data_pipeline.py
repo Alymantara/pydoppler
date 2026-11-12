@@ -1,4 +1,3 @@
-import shutil
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -94,13 +93,8 @@ def test_foldspec_uses_common_overlap_for_bundled_dataset(tmp_path: Path):
     assert dop.trsp.shape[1] == dop.wave[0].size
 
 
-@pytest.mark.skipif(
-    shutil.which("make") is None or shutil.which("gfortran") is None,
-    reason="Fortran toolchain is required for the bundled workflow regression.",
-)
 def test_bundled_dataset_runs_full_pipeline_headless(tmp_path: Path):
     workdir = tmp_path / "workdir"
-    pydoppler.copy_fortran_code(workdir)
     pydoppler.copy_test_data(workdir)
 
     dop = pydoppler.spruit(auto_install=False, interactive=False, workdir=workdir)
@@ -128,6 +122,11 @@ def test_bundled_dataset_runs_full_pipeline_headless(tmp_path: Path):
     assert diagnostics["baseline_raised"] == 0
     assert diagnostics["alpha"] == pytest.approx(0.002)
     raw = pydoppler_module._parse_dopout(workdir / "dop.out")
+    # Values of the former Fortran solver for this configuration (27 iterations).
+    assert diagnostics["fit_statistic"] == pytest.approx(0.2343095554889903, rel=1e-6)
+    assert diagnostics["entropy"] == pytest.approx(-68.5542558165651, rel=1e-6)
+    assert raw.im.max() == pytest.approx(0.4218095869818658, rel=1e-6)
+    assert abs(diagnostics["iterations"] - 27) <= 3
     vx, vy = np.meshgrid(raw.vmap, raw.vmap)
     radius = np.hypot(vx, vy)
     support = radius < raw.va * 1.001

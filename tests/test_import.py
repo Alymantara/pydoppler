@@ -28,7 +28,7 @@ def test_import_from_checkout_parent_exposes_api(tmp_path: Path):
 
     code = """
 import pydoppler
-assert hasattr(pydoppler, "copy_fortran_code")
+assert hasattr(pydoppler, "copy_test_data")
 assert hasattr(pydoppler, "spruit")
 """
     subprocess.run([sys.executable, "-c", code], check=True, cwd=tmp_path)

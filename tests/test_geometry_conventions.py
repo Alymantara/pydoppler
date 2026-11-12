@@ -21,7 +21,7 @@ def plt():
 
 def write_output(path: Path, *, nv=4, va=300.0, phases=(0.25, 0.75),
                  dm=None, dmr=None, im=None, iph=1):
-    """Write a small Fortran-format output with independent physical grids."""
+    """Write a small ``dop.out`` with independent physical grids."""
     phases = np.asarray(phases)
     velocities = np.array([-200.0, -100.0, 0.0, 100.0, 200.0])
     nph, nvp = len(phases), len(velocities)

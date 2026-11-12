@@ -1,13 +1,12 @@
 {
   "generator": "docs/make_readme_figures.py (sample_script.main(), Agg backend)",
-  "run_output_sha256": "ae47c0cb62b1a96bb7eb2e773d9bdd31640f05e7ad4a07ffb56f0a681b5bd537",
+  "run_output_sha256": "bd81f04279f47d46728d0aba8044151ef5218b0e53c0511319fef9b347a631c1",
   "sources": {
-    "sample_script.py": "23f85f430ea3075f76173ed6928115025757a830d386a8aa9c0a3c818f65c9c1",
-    "pydoppler/pydoppler.py": "0c1d148189e7cb5b70319a5c78b0d139f10981aec2ac957d26734fccb0d37926",
+    "sample_script.py": "dd3fe2673054b4a724ee97f66dfd04abea8b4355d8f99213bb123980319da927",
+    "pydoppler/pydoppler.py": "0d75b2bd70f9bbd70e252909487e0c9545706d85318450418743b0f8a8af8c99",
     "pydoppler/preprocessing.py": "272436cc818b2ec74346c24bc63bc79abce3dc6f6db90830d917be4efc1e3c54",
-    "pydoppler/runtime.py": "b6d4fa2e4058dcba1f3fd5ca437fd8ebe96a45f4ded9e693e87eec0916278c56",
-    "pydoppler/fortran_code/dop_core.f90": "96674d5b56e372d4679621261bfe8abd1e56b8ed2d53f0bb7224191618929aa8",
-    "pydoppler/fortran_code/dop.f90": "d659973a15282f043ebc0cc841953ce7ccd8d14f2f957312541812877964ad0c"
+    "pydoppler/runtime.py": "896fb6bfce0c4bf7c6ff3228663ef85c8a45d424284d9234d0f8b3839720aa20",
+    "pydoppler/solver.py": "1c06d814f34534dba0be34265cf96cd0945a2f8341ba3ac59e07c24f3f017a94"
   },
   "outputs": {
     "docs/readme_images/Trail.svg": "54907c80ded0d0e748a0db473a4372654326d863df04ed93591f0cf49f31b78a",

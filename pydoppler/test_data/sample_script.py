@@ -16,7 +16,7 @@ SHOW_PLOTS = False
 
 
 def main() -> None:
-    # Fortran execution + outputs are isolated in this directory.
+    # The spectra and all solver files are kept in this directory.
     workdir = Path.cwd() / "pydoppler-workdir"
     if SAVE_PDFS and not SHOW_PLOTS:
         os.environ.setdefault("MPLBACKEND", "Agg")
@@ -24,10 +24,9 @@ def main() -> None:
 
     import matplotlib.pyplot as plt
 
-    # Copy the bundled U Gem spectra and the solver sources.
+    # Copy the bundled U Gem spectra.
     # <<< COMMENT OUT IF YOU DONT NEED THE TEST DATASET >>>
     pydoppler.copy_test_data(workdir, overwrite=True)
-    pydoppler.copy_fortran_code(workdir, overwrite=True)
 
     dop = pydoppler.spruit(workdir=workdir)
 

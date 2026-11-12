@@ -110,8 +110,7 @@ underdetermined continuum cannot supply an error estimate and raises an error.
 
 For a statistical fit, set `iw=1` **before** calling `Dopin()`. With the default
 `covariance_mode="full"`, `Syncdop()` uses the prepared full covariance (backend
-mode `iw=2`) and a Gaussian objective, regardless of the `ih` setting. The
-precision matrices are passed to the solver in a binary file.
+mode `iw=2`) and a Gaussian objective, regardless of the `ih` setting.
 For residual `r_p = y_p - model_p` in unmasked spectrum `p`,
 
 ```text
@@ -275,30 +274,41 @@ point-mass, circular-binary overlays.
 
 ## Reproducibility, tests, and limits
 
-`Syncdop()` hashes sources, compiler identity, and the executable to cache the
-build, then **executes every requested inversion**. All solver arrays are
-allocated at run time with a sparse, exactly sized projection, so one
-executable serves every data and map size and memory scales with the number
-of nonzero projection weights. A work-directory lock
+`Syncdop()` **executes every requested inversion** in the calling process,
+with the NumPy/SciPy solver in `pydoppler/solver.py`. The projection is sparse
+and exactly sized, so memory scales with the number of nonzero projection
+weights. It is built on up to four threads (`threads`); the result does not
+depend on their number. A work-directory lock
 prevents concurrent collisions. `dopin.json` records continuum settings, noise
 recipes, and hashes of the actual input arrays. `run.json` includes matching
-preprocessing metadata, parameters, hashes, diagnostics, and success/failure;
+preprocessing metadata, parameters, input and output hashes, the hash of the
+solver source, the Python, NumPy and SciPy versions, diagnostics, and
+success/failure;
 it explicitly marks preprocessing metadata unavailable when manual input edits
 break that association. These records do not replace upstream calibration or
 ephemeris provenance. `dop.status` records convergence. Managed
 plots reject unsuccessful or modified output. A memory estimate is checked
 before projection and dense covariance preparation; `max_memory_bytes` and `run_timeout`
-bound individual runs. Refresh old working directories explicitly with
-`copy_fortran_code(workdir, overwrite=True)`; the default installer preserves
-existing files.
+bound individual runs. The time limit is checked between projection work
+blocks and optimizer iterations. Fortran sources, executables and
+`dop.precision` files left in working directories by earlier versions are
+ignored.
+
+The solver follows, step by step, the arithmetic of the Fortran code it
+replaced. On the bundled data both take the same number of iterations and
+their maps agree to rounding (1e-12 of the peak or better). Rounding
+differences accumulate over long optimizations, so results from different
+platforms or library versions can differ at the level allowed by the
+stationarity tolerance `ac`.
 
 The automated suite includes independent variance/covariance calculations,
 Monte Carlo propagation through continuum subtraction, finite-difference
 objective derivatives, projection-adjoint checks, exact square-pixel
 projection at a cardinal phase, alpha-schedule bracketing and plateau
 detection, excluded-phase corruption,
-intentional nonconvergence, run/cache provenance, and analytic S-wave recovery
-in all four map quadrants. Injection tests cover both signs of gamma and
+intentional nonconvergence, run provenance, analytic S-wave recovery
+in all four map quadrants, and comparisons with stored results of the former
+Fortran solver (`tests/data/fortran_reference.npz`). Injection tests cover both signs of gamma and
 flux/error scaling by `1e-15`. Geometry checks cover phase wraps, exposure
 overlaps, map centers, Roche geometry (including equal masses), and projected
 resonances.

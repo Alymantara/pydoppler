@@ -86,7 +86,7 @@ class DopplerOutput:
 
     ``vp``, ``va`` and ``vmap`` are in km/s, phases and exposure widths in
     cycles; ``gamma`` retains the input header's cm/s units. ``im`` uses
-    displayed [Vy, Vx] array order after the documented Fortran-axis exchange.
+    displayed [Vy, Vx] array order: the solver's internal axes are exchanged.
     """
     path: Path
     nph: int
@@ -203,7 +203,7 @@ def _read_verified_dopout(path: Union[Path, str]) -> DopplerOutput:
 
 
 def _parse_dopout(dopout_path: Union[Path, str]) -> DopplerOutput:
-    """Parse Spruit's ``dop.out`` output into structured NumPy arrays."""
+    """Parse a ``dop.out`` file (Spruit's layout) into structured NumPy arrays."""
 
     path = Path(dopout_path)
     with path.open(encoding="utf-8") as handle:
@@ -255,7 +255,7 @@ def _parse_dopout(dopout_path: Union[Path, str]) -> DopplerOutput:
     iph = int(take(1, "exposure-width flag")[0])
     dpha = (take_float_array(nph, "phase widths") / (2.0 * np.pi)
             if iph == 1 else np.full(nph, 1.0 / nph))
-    # Fortran writes spectral bin centers, already corrected for gamma.
+    # The file holds spectral bin centers, already corrected for gamma.
     vp = take_float_array(nvp, "velocity grid") / 1e5
     if not np.all(np.isfinite(vp)) or np.any(np.diff(vp) <= 0):
         raise RuntimeError(f"Velocity centers must be finite and increasing in {path}.")
@@ -304,24 +304,10 @@ def _parse_dopout(dopout_path: Union[Path, str]) -> DopplerOutput:
     )
 
 
-def get_fortran_code_path():
-    """Return a Traversable pointing to the bundled Fortran sources."""
-
-    return resource_files(__package__).joinpath("fortran_code")
-
-
 def get_test_data_path():
     """Return a Traversable pointing to the bundled test data."""
 
     return resource_files(__package__).joinpath("test_data")
-
-
-def copy_fortran_code(
-    destination: Union[Path, str], overwrite: bool = False
-) -> List[Path]:
-    """Copy the bundled Fortran assets into *destination*."""
-
-    return _copy_tree(get_fortran_code_path(), Path(destination), overwrite)
 
 
 def copy_test_data(
@@ -361,19 +347,19 @@ def install_sample_script(
 
 
 class spruit:
-    """Wrapper around Henk Spruit's Doppler tomography code.
+    """Doppler tomography after Henk Spruit's maximum-entropy code.
 
     Typical workflow
     ----------------
     1. Set ``base_dir`` and ``list`` to point at the spectra and phase file.
     2. Call :meth:`Foldspec` to load and interpolate spectra to a common grid.
     3. Call :meth:`Dopin` to continuum-subtract and write ``dopin`` in ``workdir``.
-    4. Call :meth:`Syncdop` to compile/run the Fortran code in ``workdir``.
+    4. Call :meth:`Syncdop` to run the inversion; its files go to ``workdir``.
     5. Use :meth:`Dopmap`, :meth:`Reco`, and :meth:`Residuals` for diagnostics.
 
     Notes
     -----
-    - ``workdir`` isolates all Fortran build products and outputs (defaults to
+    - ``workdir`` isolates the solver's input and output files (defaults to
       ``./pydoppler-workdir``).
     - ``nbins`` controls the *diagnostic* phase binning used in trail plots; it
       does not change the inversion, which uses all input spectra.
@@ -432,7 +418,6 @@ class spruit:
         self.alf = 1.7
         self.nal = None  # None: 0 for unweighted fits, 25 for Gaussian fits
         self.clim = None  # None: 1.0
-        self.ipri = 2
         self.norm = 0
         self.conditional_normalization = False
         self.wid = 10e5
@@ -444,6 +429,7 @@ class spruit:
         self.covariance_rcond = 1e-10
         self.covariance_ranks = None
         self.map_size = None  # otherwise use overs times the spectral channel count
+        self.threads = None  # projection threads; None: up to four
         self.run_timeout = 600.0
         self.max_memory_bytes = 2_000_000_000
         self.fit_diagnostics = None
@@ -465,44 +451,34 @@ class spruit:
     def install_assets(
         self, destination: Union[Path, str], force: bool = False
     ) -> None:
-        """Install bundled assets into *destination*.
+        """Install the example script into *destination*.
 
         Parameters
         ----------
         destination:
-            Directory where the Fortran sources and helper script should be
-            installed.
+            Directory that receives ``sample_script.py``.
         force:
-            When ``True`` existing files are overwritten.
+            When ``True`` an existing script is overwritten.
         """
 
         dest_dir = Path(destination)
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        copied_fortran = copy_fortran_code(dest_dir, overwrite=force)
-        script_path: Optional[Path] = None
-        if force or copied_fortran:
+        if force or not (dest_dir / "sample_script.py").exists():
             script_path = install_sample_script(dest_dir, overwrite=force)
-
-        if copied_fortran:
-            self._log(logging.INFO, f"Installed Fortran assets into {dest_dir}.")
-        else:
-            self._log(logging.DEBUG, "Fortran assets already present; skipping copy.")
-
-        if script_path:
             self._log(logging.INFO, f"Sample script available at {script_path}.")
         else:
             self._log(logging.DEBUG, "Sample script already present; not copied.")
 
 
     def set_workdir(self, destination: Union[Path, str]) -> Path:
-        """Set the working directory used for Fortran execution and outputs.
+        """Set the working directory used for the solver's files.
 
         Parameters
         ----------
         destination:
-            Path where ``dopin``, ``dop.in``, ``dop.out``, and intermediate build
-            products should be created.
+            Path where ``dopin``, ``dop.in``, ``dop.out`` and the run records
+            should be created.
 
         Returns
         -------
@@ -530,7 +506,6 @@ class spruit:
                 index += 1
                 continue
             break
-        copy_fortran_code(candidate, overwrite=False)
         self.workdir = candidate.expanduser().resolve()
         return self.workdir
 
@@ -793,12 +768,12 @@ class spruit:
         continuum_band: Optional[Sequence[float]] = None,
         flux_covariance=None,
     ):
-        """Continuum-subtract spectra and write the Fortran input file ``dopin``.
+        """Continuum-subtract spectra and write the solver input file ``dopin``.
 
         The method fits a polynomial continuum in two wavelength windows bracketing
         the emission line, subtracts it from each spectrum, interpolates onto a
         common velocity grid, and writes the result to ``workdir/dopin`` for
-        Spruit's Fortran tomography code.
+        the tomography solver.
 
         Parameters
         ----------
@@ -1298,10 +1273,9 @@ class spruit:
 
 
     def Syncdop(self, nri=None, ndi=None):
-        """Build and execute the solver, returning validated fit diagnostics.
+        """Run the inversion and return its validated fit diagnostics.
 
-        Every call executes the solver; the executable is compiled once per
-        source and compiler version and serves every data and map size.
+        Every call executes the solver (:mod:`pydoppler.solver`).
         A run succeeds only if the optimizer converges, the RMS target is met,
         and the finite output matches the current input. ``run.json`` records
         provenance. With supplied errors, ``covariance_mode='full'`` (default)
@@ -1419,7 +1393,7 @@ class spruit:
         ax = fig.add_subplot(111)
         ax.minorticks_on()
         edges = _bin_edges(parsed.vmap)
-        # Fortran writes x-major. Keeping its array order here exchanges the
+        # The stored map is x-major. Keeping its array order here exchanges the
         # internal axes, producing the public radial-velocity convention above.
         img = ax.imshow(
             display, interpolation="nearest", cmap=cmap_plot, aspect="equal",
