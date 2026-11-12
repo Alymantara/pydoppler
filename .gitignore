@@ -1,2 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.DS_Store
+*.png
+*.pdf
 
-*.whl
+# README figures are tracked
+!docs/images/
+!docs/images/*.png

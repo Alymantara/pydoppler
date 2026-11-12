@@ -1,37 +1,39 @@
 # PyDoppler
 
-  This is the repository for a python wrapper for Henk Spruit's doppler tomography software.
-  This code can produce a trail spectra of a dataset, and perform
-  Doppler tomography maps. It is intended to be a light-weight code for
-  single emission line datasets.
-  The code will be able to:
+  PyDoppler is a light-weight Python package for Doppler tomography of single
+  emission-line datasets, based on Henk Spruit's maximum-entropy Doppler
+  tomography code. It can produce a trail spectrum of a dataset and compute
+  and plot Doppler tomography maps.
+
+  **Version 1.0 is a pure Python (NumPy/SciPy) implementation. No Fortran
+  compiler is needed any more.** A full run on the test dataset takes about
+  5 seconds.
+
+  The code is able to:
   - [x] Load and normalise spectra
-  - [x] Plot a trail spectra at initial phase resolution and binned
-  - [x] Run Doppler tomography and plot reconstructed spectra
+  - [x] Plot a trail spectrum at the initial phase resolution and binned
+  - [x] Run Doppler tomography and plot the reconstructed spectra
+  - [x] Run entirely in Python, with no Fortran compiler
+  - [x] Auto-save figures
   - [ ] Perform initial spectra binning into user-defined phase bins
   - [ ] User-friendly functions
-  - [ ] Auto-save figures.
 
   The original code and IDL interface can be found at:
    *  https://wwwmpa.mpa-garching.mpg.de/~henk/
 
-  At the moment, there are many features that haven't been implemented. However, the code will be updated
-  continuously. If you have any queries/comments/bug reports please send an e-mail to:
+  If you have any queries, comments or bug reports, please send an e-mail to:
    * jvhs1 (at) st-andrews.ac.uk
 
   ## Acknowledgment
-  
+
   If you make use of this software, please acknowledge the original code and this repository with the following citations:
    * Spruit 1998, arXiv, astro-ph/9806141 (https://ui.adsabs.harvard.edu/abs/1998astro.ph..6141S/abstract)
    * Hernandez Santisteban, 2021, ASCL, 6003 (https://ui.adsabs.harvard.edu/abs/2021ascl.soft06003H/abstract)
 
   ## Requirements & Installation
 
-  The doppler tomography code is written in fortran. Please ensure that you have a fortran compiler installed.
-  At the moment, only gfortran is supported.
-
-
-  Python >3.0 version is required (No tests have been done for backwards compatibility with python 2.X).
+  Python >= 3.8 is required, together with `numpy`, `scipy` and `matplotlib`
+  (version 3.5 or newer). These are installed automatically.
 
   You can download and install PyDoppler via pip. In a terminal command line, just type:
 
@@ -41,29 +43,39 @@
 
   If you need to upgrade the package to the latest version, you can do this with
   ```
-  pip install pydoppler -upgrade
+  pip install --upgrade pydoppler
+  ```
+
+  To install the development version from a clone of this repository:
+  ```
+  pip install -e .
   ```
 
   ##  Section 1:  Usage
 
-  You can use the sample_script.py file to run all the relevant commands
-  _shown in sections 2 and 3_ from a terminal command line as:
-  ```
-  python sample_scipt.py
-  ```
-  or in a python console:
-  ```python
-  run sample_scipt.py
-  ```
-  This will read all the files, normalise the spectra, perform Doppler
-  tomography and output the results. In the following sections, I will briefly
-  explain each main routine.
+  There are two ways to learn the package:
+
+  * **Tutorial notebook:** [`notebooks/PyDoppler_tutorial.ipynb`](notebooks/PyDoppler_tutorial.ipynb)
+    walks through every step with explanations, all the parameters and the outputs.
+  * **Sample script:** `pydoppler.test_data()` copies `sample_script.py` into your
+    working directory together with the test data. It runs all the commands
+    _shown in sections 2 and 3_. From a terminal:
+    ```
+    python sample_script.py
+    ```
+    or in an (i)python console:
+    ```python
+    run sample_script.py
+    ```
+    This reads all the files, normalises the spectra, performs Doppler
+    tomography and saves the results. The following sections briefly
+    explain each main routine.
 
   ##  Section 2: How to load data
 
   ###  Section 2.1: Test case - the accreting white dwarf - U Gem
 
-  You can start to test PyDoppler with a test dataset kindly provided by J. Echevarria and published
+  You can start testing PyDoppler with a test dataset kindly provided by J. Echevarria and published
   in Echevarria et al. 2007, AJ, 134, 262 (https://ui.adsabs.harvard.edu/abs/2007AJ....134..262E/abstract).
   To copy the data to your working directory, open a (i)python console and run the
   following commands:
@@ -71,245 +83,163 @@
   import pydoppler
 
   pydoppler.test_data()
-
   ```
-  This will create a subdirectory (called ugem99) in your current working directory
-  which will contain text files for each spectra (txtugem40*). The format of
-  each spectrum file is two columns: _Wavelength_ and _Flux_.
+  This creates a subdirectory called `ugem99` in your current working directory.
+  It contains a text file for each spectrum (`txhugem40*`), and also copies
+  `sample_script.py`. Each spectrum file has two columns: _Wavelength_ and _Flux_.
   * Wavelength is assumed to be in Angstrom.
-  * Don't use headers in the files or us a _#_ at the start of the line, so it
-  will be ignored.
+  * Don't use headers in the files, or start the line with a _#_ so it is ignored.
 
-  In addition, a phase file (ugem0all.fas) will be added inside the ugem99
-  directory which contains the name
-  of each spectrum file and its corresponding orbital phase.
-  This is a two column file with the following format:
+  In addition, a phase file (`ugem0all.fas`) is placed inside the `ugem99`
+  directory. It lists the name of each spectrum file and its orbital phase,
+  in two columns with the following format:
 ```
-  txtugem4004 0.7150
-  txtugem4005 0.7794
+  txhugem4004 0.7150
+  txhugem4005 0.7794
          .
          .
          .
 ```
 
   ###  Section 2.2: Load your data
-  I recommend to stick to the previous file format (as in the test dataset):
+  I recommend sticking to the same file format as the test dataset:
 
   * Individual spectra. Two-column files, _space separated_: Wavelength  Flux
   * Phase file. Two-column file, _space separated_: Spectrum_name  Orbital_Phase
 
-  and the following directory tree in order for PyDoppler to work properly:
+  and the following directory tree, so that PyDoppler works properly:
 
   ```
   wrk_dir
-  ├── data_dir (your target)
-  │   │
-  │   ├── individual_spectra (N spectra)
-  │   │
-  │   └── phases_file
-  │
-  └── fortran_code_files
+  └── data_dir (your target)
+      │
+      ├── individual_spectra (N spectra)
+      │
+      └── phases_file
   ```
 
   ##  Section 3:  Doppler tomography tutorial
-  Before running any routines, verify that you have added all the relevant
-  parameters into the PyDoppler object.
-
-  * _NOTE:_ The pydoppler.spruit() will also copy into the working directory
-  a copy of a sample script (sample_scipt.py) with all the commands in the
-  following tutorial. The code will add a new script (e.g. sample_scipt-1.py)
-  if you use the "install_force=True" keyword, it will not overwrite the one
-  found in the directory.
+  Before running any routines, make sure you have added all the relevant
+  parameters to the PyDoppler object.
 
   ```python
   import pydoppler
+  import matplotlib.pyplot as plt
 
   # Load base object for tomography
   dop = pydoppler.spruit()
 
   # Basic data for the tomography to work
   dop.object = 'U Gem'
-  dop.base_dir = 'ugem99' # Base directory for input spectra
-  dop.list = 'ugem0all.fas'		# Name of the input file
-  dop.lam0 = 6562.8 # Wavelength zero in units of the original spectra
-  dop.delta_phase = 0.003  # Exposure time in terms of orbital phase
-  dop.delw = 35	# size of Doppler map in wavelength centred at lam0
-  dop.overs = 0.3 # between 0-1, Undersampling of the spectra. 1= Full resolution
-  dop.gama = 36.0  # Systemic velocity in km /s
-  dop.nbins = 28  # Number of bins. Only supported the number of spectra at the moment
+  dop.base_dir = 'ugem99'     # Base directory for input spectra
+  dop.list = 'ugem0all.fas'   # Name of the phase file
+  dop.lam0 = 6562.8           # Wavelength zero in units of the original spectra
+  dop.delta_phase = 0.003     # Exposure time in terms of orbital phase
+  dop.delw = 35               # Size of the Doppler map in wavelength, centred at lam0
+  dop.overs = 0.3             # Between 0-1, undersampling of the spectra. 1 = full resolution
+  dop.gama = 36.0             # Systemic velocity in km/s
+  dop.nbins = 28              # Number of bins. Only the number of spectra is supported at the moment
   ```
 
   ### Section 3.1: Read the data
-  This routine reads in the raw data and prepares the files for further
-  processing.
+  This routine reads in the raw data and prepares it for further processing.
   ```python
   # Read in the individual spectra and orbital phase information
   dop.Foldspec()
   ```
   ```
-  001 txhugem4004  0.715 2048
-  002 txhugem4005  0.7794 2048
-  003 txhugem4006  0.8348 2048
-  004 txhugem4007  0.8942 2048
-  005 txhugem4008  0.9518 2048
-  006 txhugem4009  0.0072 2048
-  007 txhugem4010  0.0632 2048
-  008 txhugem4011  0.1186 2048
-  009 txhugem4012  0.1745 2048
-  010 txhugem4013  0.2344 2048
-  011 txhugem4014  0.2904 2048
-  012 txhugem4015  0.3724 2048
-  013 txhugem4016  0.4283 2048
-  014 txhugem4017  0.4866 2048
-  015 txhugem4018  0.5425 2048
-  016 txhugem4019  0.5979 2048
-  017 txhugem4020  0.6544 2048
-  018 txhugem4021  0.7098 2048
-  019 txhugem4022  0.7652 2048
-  020 txhugem4023  0.8195 2048
-  021 txhugem4024  0.8772 2048
-  022 txhugem4025  0.9269 2048
-  023 txhugem4026  0.9614 2048
-  024 txhugem4027  0.9959 2048
-  025 txhugem4028  0.0304 2048
-  026 txhugem4029  0.0648 2048
-  027 txhugem4030  0.1027 2048
-  028 txhugem4031  0.1372 2048
-```
-
-  ### Section 2.2: Normalise the data and set doppler files
-  You will need to define a continnum band - one at each side of the emission line -
-  to fit and later subtract the continuum. This normalised spectra will be put in
-  in a file to be read by the fortran code.
-  ```python  
-  # Normalise the spectra
-      dop.Dopin(continnum_band=[6500,6537,6591,6620],
-      		 plot_median=False,poly_degree=2)
+  →  Found 28 spectra in ugem99/ugem0all.fas
+  →  Phase bins: 28
+  [██████████████████████████████] 100%  txhugem4031  φ=0.1372  npix=2048
+  ✓  Loaded 28 spectra, 2048 pixels each
   ```
 
+  ### Section 3.2: Normalise the data
+  You need to define a continuum band on each side of the emission line,
+  which is used to fit and subtract the continuum.
+  ```python
+  # Normalise the spectra
+  dop.Dopin(continnum_band=[6500, 6537, 6591, 6620],
+            plot_median=False, poly_degree=2)
+  ```
+  This saves `Average_Spec.png` (the average spectrum, continuum fit and the
+  velocity window of the map) and `Trail.png` (the trail spectrum).
 
   <p align="middle">
-     <img src="pydoppler/test_data/output_images/Average_Spec.png" width="350" height="450" />
-     <img src="pydoppler/test_data/output_images/Trail.png" width="350" height="450" />
+     <img src="docs/images/Average_Spec.png" width="420" />
+     <img src="docs/images/Trail.png" width="340" />
   </p>
 
-  ### Section 2.3: Run the fortran code
-  Now, let's run the tomography software!
+  ### Section 3.3: Run the Doppler tomography
+  The maximum-entropy reconstruction runs in Python.
   ```python
   # Perform tomography
   dop.Syncdop()
   ```
-
-  The output of the fortran code is:
   ```
-  nvp 477
-  (28, 477)
-  nv 143 143
-  Estimated Memory required  354  Mbytes
-        parameter (nd=npm*nvpm,nr=0.8*nvm*nvm)
+  Syncdop — MEM Doppler tomography  (native Python)
+  ────────────────────────────────────────────────────────────
+  →  Map grid:    144 × 144 pixels
+  →  Input data:  28 phases × 477 velocity channels
+  →  Projection matrix: sparse, ~29 MB
 
-        parameter (nt=nvpm*npm+nvm*nvpm*3+2*npm*nvm)
+  Alpha step           α     nit         χ    target
+  ──────────  ──────────  ──────  ────────  ────────
+  ✓  α=2.00e-03  nit=  28  χ=1.5233  (target ≤ 1.60)
 
-        parameter (nri=0.9*nvm*nt/nd,ndi=0.9*nvm*nt/nr)
-
-  c parameters for emap routines
-
-        parameter (nf=nd,nfp=ndi,nrp=nri)
-
-        parameter (ni=nvm,nj=nvm)
-
-        parameter (nch=1,nsu=1)
-
-  * Computing MEM tomogram
-  cp -f cclock.f clock.f ; gfortran -O -w -o dopp dop.f clock.f
-  dopp
-  make: dopp: No such file or directory
-  make: *** [dop.out] Error 1
-   RL max entropy, floating defaults
-   ih        0  (log likelihood)                      
-   iw        0  (no error bars read in)               
-   pb0,pb1 0.950 1.050
-   ns        7
-   ac      8.00E-04
-   nim     150
-   al0, alf, nal    0.0020 1.7000  -1
-   clim   1.6000
-   ipri    2
-   norm    1
-   wid, af   0.10E+07 1.0000
-   HOLAQQ NOW 2Q
-   cpu for geometry      0.19
-   HOLAQQQQ
-   it      H+alfa*S        delta
-     1  3.064384039127E+04   8.97E-01
-     2  3.124296879919E+04   8.88E-01
-     3  3.174029201244E+04   8.10E-01
-     4  3.187324638623E+04   6.27E-01
-     5  3.189338120949E+04   4.84E-01
-     6  3.189804389182E+04   3.63E-01
-     7  3.189972657354E+04   2.60E-01
-     8  3.190005031439E+04   2.13E-01
-     9  3.190020880677E+04   1.65E-01
-    10  3.190026635720E+04   1.43E-01
-    11  3.190030859976E+04   1.14E-01
-    12  3.190032174052E+04   9.00E-02
-    13  3.190032685539E+04   7.44E-02
-    14  3.190032853609E+04   5.82E-02
-    15  3.190032918090E+04   4.18E-02
-    16  3.190032942768E+04   2.94E-02
-    17  3.190032951013E+04   2.23E-02
-    18  3.190032954797E+04   1.53E-02
-    19  3.190032956032E+04   1.32E-02
-    20  3.190032956654E+04   9.57E-03
-    21  3.190032956866E+04   5.22E-03
-    22  3.190032956935E+04   1.92E-03
-    23  3.190032956960E+04   2.18E-03
-    24  3.190032956968E+04   8.18E-04
-    25  3.190032956971E+04   4.46E-04
-   ni, al, hs, rr:   25 0.00200  0.319003296E+05 1.48261 1.60000
-   cpu for iteration    0.81
-   entropy -2.4072E+04
+  ✓  Converged!  χ = 1.5233  (target ≤ 1.60)  [0.7 s]
+  →  Final α = 2.00e-03   iterations = 28
+  →  Entropy S = -2.5016e+04
   ```
-  ### Section 2.4: Plot the tomography map
-  This routine will display the outcome of the Doppler tomography. You can overplot
+  The map size is set automatically from `dop.overs`. Pass `nv=` to
+  `Syncdop()` to choose it yourself (e.g. `dop.Syncdop(nv=100)`).
+
+  ### Section 3.4: Plot the tomography map
+  This routine displays the result of the Doppler tomography. You can overplot
   contours and streams.
   ```python
-  # Read and plot map
-  cb,data = dop.Dopmap(limits=[0.05,0.99],colorbar=True,cmaps=cm.mamga_r,
-  					smooth=False,remove_mean=False)
+  # Read and plot the map (defaults: linear stretch, magma_r colour map)
+  fig, data = dop.Dopmap(colorbar=True)
+
   # Overplot the donor contours, keplerian and ballistic streams
-  qm=0.35   # mass ratio M_2 / M_1
-  k1 = 107  # Semi amplitude of the primary in km/s
-  inc=70    # inclination angle, in degrees
-  m1=1.2    # Mass of the primary in solar masses
-  porb=0.1769061911  # orbital period in days
+  qm = 0.35             # mass ratio M_2 / M_1
+  k1 = 107              # semi-amplitude of the primary in km/s
+  inc = 70              # inclination angle, in degrees
+  m1 = 1.2              # mass of the primary in solar masses
+  porb = 0.1769061911   # orbital period in days
 
-
-  pydoppler.stream(qm,k1,porb,m1,inc)
+  pydoppler.stream(qm, k1, porb, m1, inc,
+                   tidal_radius=True, resonance_32=True, resonance_21=True)
   ```
   <p align="middle">
-     <img src="pydoppler/test_data/output_images/Doppler_Map.png" width="520" height="450" />
+     <img src="docs/images/Doppler_Map.png" width="520" />
   </p>
 
-  ### Section 2.5: Spectra reconstruction
-  Always check that reconstructed spectra looks like the original one. A good
-  rule of thumb "If a feature on the Doppler tomogram is not in the trail
-  spectrum, most likely its not real!"
+  Useful `Dopmap` options: `stretch='linear' | 'sqrt' | 'log'`,
+  `cmaps=plt.cm.afmhot` (or any matplotlib colour map), `limits=[lo, hi]`,
+  `percentile_lo` / `percentile_hi` and `smooth=True`. With dark colour maps,
+  pass `colors='white'` to `stream()`.
+
+  ### Section 3.5: Spectra reconstruction
+  Always check that the reconstructed spectra look like the original ones. A good
+  rule of thumb: "If a feature on the Doppler tomogram is not in the trail
+  spectrum, most likely it's not real!"
 
   ```python
-  # plot trail spectra
-  cb2,cb3,dmr,dm = dop.Reco(colorbar=True,limits=[.05,0.95],cmaps=cm.magma_r)
+  # Plot the observed and reconstructed trail spectra
+  fig, dm, dmr = dop.Reco(colorbar=True, limits=[0.05, 0.95])
   ```
-  where the output variables cb2 and cb3 hold the colorbar objects (if selected); dmr and dm hold the data cubes for the reconstructed trail spectra and the binned data, respectively.
+  Here `fig` is the figure, and `dm` and `dmr` hold the input and reconstructed
+  trail spectra (phase × velocity, baseline removed), respectively.
   <p align="middle">
-     <img src="pydoppler/test_data/output_images/Reconstruction.png" width="520" height="450" />
+     <img src="docs/images/Reconstruction.png" width="620" />
   </p>
 
-  ## Section 3: Extra commands
-  There are many other commands that will interact with the Doppler tomogram. As
-  usual, you can update them inside the pydoppler.spruit object as we did in
-  section 2. The configurable parameters are:
-  ```python3
+  ## Section 4: Extra commands
+  Many other parameters control the Doppler tomogram. As usual, you can set
+  them on the `pydoppler.spruit` object, as in Section 3. The configurable
+  parameters are:
+  ```python
   dop.ih = 0            # type of likelihood function (ih=1 for chi-squared)
   dop.iw = 0            # iw=1 if error bars are to be read and used
   dop.pb0 = 0.95        # range of phases to be ignored, between 0 and 1
@@ -317,17 +247,42 @@
   dop.ns = 7            # smearing width in default map
   dop.ac = 8e-4         # accuracy of convergence
   dop.nim = 150         # max no of iterations
-  dop.al0 = 0.002       # starting value of alfa
-  dop.alf = 1.7         # factor
-  dop.nal = 0           # max number of alfas
-  dop.clim = 1.6        # 'C-aim'
-  dop.ipri = 2          # printout control for standard output channel (ipr=2 for full)
-  dop.norm = 1          # norm=1 for normalization to flat light curve
-  dop.wid = 10e5        # width of central absorption fudge
-  dop.af = 0.0          # amplitude of central absorption fudge
+  dop.al0 = 0.002       # starting value of alpha
+  dop.alf = 1.7         # factor between successive alphas
+  dop.nal = 0           # max number of alphas (0 = single alpha)
+  dop.clim = 1.6        # 'C-aim', target reduced chi
+  dop.norm = 1          # norm=1 for normalisation to a flat light curve
+  dop.overs = 0.3       # map oversampling (sets the map size)
   ```
 
-  ## Section 4: Troubleshoot
-  This is an early version of the wrapper. Things will go wrong. If you find a
-  bug or need a feature, I will try my best to work it out. If you think you can
-  add to this wrapper, I encourage you push new changes and contribute to it.
+  ## What's new in version 1.0
+
+  * **No Fortran.** The Fortran `dop.f` engine and the `make`/`gfortran` step
+    are replaced by `pydoppler/mem_engine.py`, a NumPy/SciPy implementation of
+    the same algorithm (Lucy-accelerated Richardson-Lucy iteration with a
+    floating-default maximum-entropy regularisation).
+  * **Fast.** The projection matrix is built in vectorised form and stored as a
+    sparse matrix. On the U Gem dataset, the tomography step takes about 0.7 s
+    and the complete sample script about 5 s.
+  * **Checked against Spruit's `dop.f`.** The projection geometry, default-map
+    smoothing, entropy and its derivatives, baseline handling and alpha schedule
+    follow the Fortran routines (`prom`, `chimg`, `entr`, `lamun`, `basel`,
+    `alfs`). A point-source test recovers the line-of-sight velocities to
+    0.000 km/s, with no velocity-channel offset.
+  * **Safer alpha schedule.** When the fit stops improving (at the noise floor
+    of the data), the alpha sequence falls back to geometric steps instead of
+    diverging.
+  * **Plots.** New defaults (linear stretch, `magma_r`), phases increase upwards
+    in the reconstruction plot, and all routines save their figures.
+
+  ## Development notes
+
+  Version 1.0, including the conversion from Fortran to native Python, the
+  performance optimisation and the line-by-line validation against Spruit's
+  `dop.f`, was developed with the help of Claude, Anthropic's AI assistant,
+  using **Claude Opus 5.5** (model `claude-opus-5-5`) in Claude Code.
+
+  ## Section 5: Troubleshoot
+  If you find a bug or need a feature, I will try my best to work it out. If
+  you think you can add to this package, I encourage you to push new changes
+  and contribute to it.
