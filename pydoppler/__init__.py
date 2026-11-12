@@ -1,4 +1,13 @@
-__modules__ = ['pydoppler']
-from .pydoppler import spruit, rebin_trail, stream, test_data
+"""
+PyDoppler — native Python Doppler tomography package.
 
-__version__ = "0.2.0"
+No Fortran compiler required. Pure NumPy / SciPy implementation of
+Spruit's Maximum Entropy Method (MEM) Doppler mapping code.
+"""
+
+from .pydoppler import spruit, stream, rebin_trail
+from .mem_engine import doppler_mem
+from .utils import test_data
+
+__version__ = "1.0.0"
+__all__ = ["spruit", "stream", "rebin_trail", "doppler_mem", "test_data"]

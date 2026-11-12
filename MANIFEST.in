@@ -1,0 +1,6 @@
+include README.md LICENSE CHANGELOG.md
+include pydoppler/test_data/sample_script.py
+recursive-include pydoppler/test_data/ugem99 *
+prune docs
+prune notebooks
+global-exclude __pycache__ *.py[cod] .DS_Store
