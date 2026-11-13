@@ -9,5 +9,5 @@ from .pydoppler import spruit, stream, rebin_trail
 from .mem_engine import doppler_mem
 from .utils import test_data
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __all__ = ["spruit", "stream", "rebin_trail", "doppler_mem", "test_data"]
