@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.2 (2026-11-13)
+
+### Fixed
+- `Reco` scaled the observed and reconstructed trails each by their own
+  maximum, so a single cosmic ray in the data squashed the observed panel
+  while the reconstruction saturated. Both panels now share one
+  outlier-robust scale (99.5th percentile of the observed trail) and are
+  directly comparable. Plot only; maps are unchanged.
+
+Found while testing on public ESO X-shooter spectra of GP Com (programme
+084.D-0814A; the same data as Kupfer et al. 2016, arXiv:1601.02841).
+
 ## 1.0.1 (2026-11-13)
 
 ### Fixed
