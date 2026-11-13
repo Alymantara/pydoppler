@@ -228,32 +228,16 @@ class spruit:
 
         _ok(f"Loaded {n_spec} spectra, {wo.size} pixels each")
 
-        delp = 1.0 / self.nbins
-        pha  = np.arange(0, 1, delp)
-        binn = np.arange(self.nbins + 1) / float(self.nbins)
-        binn = np.concatenate((binn[:self.nbins] - 1, binn))
-        wt   = np.zeros(2 * self.nbins)
-        trsp = np.zeros((2 * self.nbins, len(wo)))
-        dph  = delp
-        for ph, il in zip(pha, range(len(pha))):
-            ph0, ph1 = ph - dph / 2, ph + dph / 2
-            for ib in range(2 * self.nbins):
-                r = binn[ib + 1]; l = binn[ib]
-                if ph0 <= r and ph1 > l:
-                    wph = min(r, ph1) - max(r, ph1)
-                    wt[ib]   += wph
-                    trsp[ib] += wph * flux[il]
-        wt[self.nbins:] += wt[:self.nbins]
-        wt   = wt[self.nbins:]
-        trsp = trsp[self.nbins:]
-        wt   = wt / wt.sum() * float(self.nbins)
-
+        # The MEM works on the individual spectra at their own phases; nbins
+        # only sets the phase grid of the trail plot (rebin_trail in Dopin).
+        # The old per-bin loop here indexed spectra by bin number (IndexError
+        # when nbins > number of spectra) and its result was discarded anyway.
         self.wave        = wave
         self.flux        = flux
-        self.pha         = pha
         self.input_files = np.array(inputs['files'])
         self.input_phase = np.array(inputs['phase'], dtype=float)
-        self.trsp        = trsp
+        self.pha         = self.input_phase
+        self.trsp        = None   # set by Dopin (continuum-normalised spectra)
 
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -295,7 +279,7 @@ class spruit:
         plt.clf()
         ax  = fig.add_subplot(211)
         avgspec = np.sum(self.flux, axis=0)
-        ax.plot(self.wave[0], avgspec / len(self.pha), color='steelblue',
+        ax.plot(self.wave[0], avgspec / len(self.flux), color='steelblue',
                 lw=1.2, label='Average spectrum')
         ax.set_xlabel(r'Wavelength / Å')
         ax.set_ylabel('Flux')
@@ -320,21 +304,21 @@ class spruit:
 
         lop  = ((self.wave[0] > xor[0]) & (self.wave[0] < xor[1])) | \
                ((self.wave[0] > xor[2]) & (self.wave[0] < xor[3]))
-        yor  = avgspec[lop] / len(self.pha)
+        yor  = avgspec[lop] / len(self.flux)
         z    = np.polyfit(self.wave[0][lop], yor, poly_degree)
         pz   = np.poly1d(z)
         cont = pz(self.wave[0])
 
         ax.plot(self.wave[0], cont, 'r--', lw=1.5, label='Continuum fit')
         ax.set_xlim(xor[0] - 10, xor[3] + 10)
-        ax.set_ylim(yor.min() * 0.8, avgspec.max() / len(self.pha) * 1.1)
+        ax.set_ylim(yor.min() * 0.8, avgspec.max() / len(self.flux) * 1.1)
         ax.legend(fontsize=11)
 
         vell = ((self.wave[0] / self.lam0)**2 - 1) * cl / \
                (1 + (self.wave[0] / self.lam0)**2)
 
         ax2 = fig.add_subplot(212)
-        ax2.plot(vell, avgspec / len(self.pha) - cont, 'k', lw=1.1,
+        ax2.plot(vell, avgspec / len(self.flux) - cont, 'k', lw=1.1,
                  label='Bkg-subtracted')
         ax2.axhline(y=0, ls='--', color='grey', alpha=0.5)
         hlim = self.delw / self.lam0 * cl
@@ -342,7 +326,7 @@ class spruit:
         ax2.axvline(x= hlim, color='darkorange', lw=1.5)
         ax2.set_xlim(-hlim * 1.5, hlim * 1.5)
         qq = np.abs(vell) < hlim * 1.5
-        ymax = np.max(avgspec[qq] / len(self.pha) - cont[qq] - 1.0)
+        ymax = np.max(avgspec[qq] / len(self.flux) - cont[qq])
         ax2.set_ylim(-0.05 * ymax, ymax * 1.1)
         ax2.set_xlabel('Velocity / km s$^{-1}$')
         ax2.set_ylabel('Flux')

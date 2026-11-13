@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.1 (2026-11-13)
+
+### Fixed
+- `Foldspec` crashed with `IndexError` when `nbins` was larger than the number
+  of spectra (e.g. after removing eclipse spectra). Its unused phase-binning
+  loop is removed; `nbins` only sets the phase grid of the trail plot, and the
+  Doppler map is unchanged.
+- `Dopin`: the average spectrum was divided by `nbins` instead of the number of
+  spectra, mis-scaling the plot when they differ, and the lower panel's y-limit
+  subtracted a spurious 1.0, flipping the axis for continuum-normalised spectra.
+  Plot only; the per-spectrum normalisation was already correct.
+
+Found while testing on the public IP Peg outburst spectra of Papadaki, Boffin
+& Steeghs (2008, The Journal of Astronomical Data 14, 2).
+
 ## 1.0.0 (2026-11-12)
 
 First stable release: a pure Python implementation of Spruit's Doppler
