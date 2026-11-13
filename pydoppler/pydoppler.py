@@ -693,8 +693,12 @@ class spruit:
         trail_dmr, _     = rebin_trail(vp, r.dm_reco, r.phases, self.nbins,
                                         self.delta_phase)
 
-        mx_dm  = np.nanmax(trail_dm)  or 1.0
-        mx_dmr = np.nanmax(trail_dmr) or 1.0
+        # One common, outlier-robust scale for both panels, so they are
+        # directly comparable. (Scaling each by its own max let a single
+        # cosmic ray in the data squash the observed panel while the
+        # reconstruction, which has none, saturated.)
+        mx_dm  = np.nanpercentile(trail_dm, 99.5) or 1.0
+        mx_dmr = mx_dm
 
         if limits is None:
             obs = trail_dm / mx_dm

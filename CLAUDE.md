@@ -96,7 +96,7 @@ pydoppler.stream(q, k1, porb, m1, inc,
 
 ## Notes
 
-- Version 1.0.1. The projection matrix is built vectorised and sparse: the
+- Version 1.0.2. The projection matrix is built vectorised and sparse: the
   full U Gem sample script runs in ~5 s (Syncdop ~0.7 s at nv=144).
 - `mem_engine.py` follows Spruit's `dop.f` (prom, chimg, entr, lamun, basel,
   alfs); see CHANGELOG.md for the fixes relative to the first port.
